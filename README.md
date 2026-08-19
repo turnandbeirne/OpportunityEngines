@@ -24,7 +24,9 @@ This is provisioned and seeded right now, not just source on disk:
   priorities/KPI detail. See "Seeding" below — this was done via direct
   SQL (`supabase/seed_sql/`), not `seed.mjs`, because the tools used to
   provision this had no service-role key available.
-- **`invite-member` edge function:** deployed and active.
+- **`invite-member` and `admin-users` edge functions:** deployed and
+  active — real account administration (invite, list emails, reset a
+  password), not just the seeded demo accounts.
 - **Frontend:** the rendering code is ported from the HTML prototype's
   in-memory arrays to real async Supabase calls (see "What's in here" and
   "What's NOT in here yet" below for exact scope and what's still
@@ -76,6 +78,14 @@ Sign in at the app once it's deployed (or locally via `npm run dev`) with:
   onboarding path: an admin invites a real teammate or portfolio-company
   contact by email, and Supabase sends them an actual invite email. This
   is what should replace the seeded placeholder accounts before launch.
+- `supabase/functions/admin-users/` — the other half of account
+  administration: listing every member's email (public.profiles
+  deliberately doesn't duplicate auth.users' emails, so this reads them
+  server-side with the service role key) and setting a member's password
+  directly when they're locked out. Both need the service role key, so
+  neither runs in the browser — same caller-is-actually-an-admin check as
+  invite-member (the caller's own JWT proves who they are via RLS on
+  their own profile row, then the function checks role === 'admin').
 - `src/lib/supabaseClient.js`, `auth.js`, `api.js` — the client library.
   `api.js` has one function per read/write the app needs (listCompanies,
   createRequest, volunteerForRequest, postThread, upsertKpi, ...) plus a
@@ -93,6 +103,12 @@ Sign in at the app once it's deployed (or locally via `npm run dev`) with:
   subscribes to live changes on that company's requests/threads/
   challenges/KPIs and re-renders the current tab when anything changes,
   so two people looking at the same company converge without a refresh.
+  Also covers the sidebar's Snapshot panel, Quick Actions, and pinnable
+  Deep Dive Shortcuts (OE/admin only — restored after the initial port
+  dropped them), a "My Account" panel for every user (edit profile, change
+  your own password), and a "Team & Access" page for admins (member
+  directory with real emails, invite a new member, edit anyone's
+  role/company, reset anyone's password).
 
 ## What's NOT in here yet
 
@@ -145,8 +161,8 @@ Two things, deliberately scoped out rather than guessed at:
    npm run seed
    ```
 
-4. ~~Deploy the invite-member edge function.~~ **Done** — `invite-member`
-   is active on the live project.
+4. ~~Deploy the edge functions.~~ **Done** — `invite-member` and
+   `admin-users` are both active on the live project.
 
 5. **Run the frontend locally — this is the real first test.**
    ```

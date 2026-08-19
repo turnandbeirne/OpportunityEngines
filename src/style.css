@@ -111,8 +111,9 @@ select.field-input option{ background: var(--navy-800); color:#fff; }
 .side-spacer{ flex:1; }
 .side-user{
   display:flex; align-items:center; gap:10px; padding:10px 10px; border-radius:10px; background: rgba(255,255,255,0.04);
-  border:1px solid var(--navy-border);
+  border:1px solid var(--navy-border); cursor:pointer;
 }
+.side-user:hover{ border-color: var(--gold); }
 .avatar{
   width:32px; height:32px; border-radius:50%; background: linear-gradient(135deg, var(--gold-light), var(--gold-dim));
   color:var(--navy-900); font-weight:700; font-size:12.5px; display:flex; align-items:center; justify-content:center; flex-shrink:0;

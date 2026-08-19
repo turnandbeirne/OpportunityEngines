@@ -53,6 +53,14 @@ export async function updateMyProfile({ fullName, title, focus }) {
   if (error) throw error;
 }
 
+// Self-service password change. Unlike admin-setting SOMEONE ELSE's
+// password (below), this needs no service role — Supabase Auth lets a
+// signed-in user change their own password directly with the anon key.
+export async function changeMyPassword(newPassword) {
+  const { error } = await supabase.auth.updateUser({ password: newPassword });
+  if (error) throw error;
+}
+
 // ---------------------------------------------------------------------
 // Inviting real users — an admin-only action. This CANNOT run from the
 // browser with the anon key (admin.inviteUserByEmail requires the
@@ -82,4 +90,43 @@ export async function inviteMember({ email, fullName, role, companyId }) {
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
+}
+
+// ---------------------------------------------------------------------
+// Account administration (admin only) — the other half of "add other
+// members/users": seeing who's actually in the system and resetting a
+// password when someone's locked out. Both need the service role key
+// (auth.users emails aren't duplicated into public.profiles, and only
+// the admin API can set another user's password), so both are handled
+// by the admin-users edge function, never in the browser. Same
+// call-the-function pattern as inviteMember() above.
+// ---------------------------------------------------------------------
+async function callAdminUsers(action, payload) {
+  const { data: sessionData } = await supabase.auth.getSession();
+  const token = sessionData?.session?.access_token;
+  if (!token) throw new Error("Not signed in.");
+  const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/admin-users`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ action, ...payload }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+// Returns { [userId]: { email, last_sign_in_at } } for every auth user —
+// used to show emails in the admin Team & Access directory, which
+// public.profiles alone can't provide.
+export async function listMemberEmails() {
+  const { users } = await callAdminUsers("list_emails");
+  return users;
+}
+
+// Sets a specific member's password directly (rather than emailing a
+// reset link, which would need a recovery-callback screen this app
+// doesn't have yet). The admin relays the new password to the member
+// out-of-band, same convention as the seeded accounts' shared password.
+export async function adminSetPassword(userId, newPassword) {
+  const { updated } = await callAdminUsers("set_password", { user_id: userId, new_password: newPassword });
+  return updated;
 }

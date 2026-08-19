@@ -240,6 +240,29 @@ export async function getDocumentUrl(storagePath) {
 }
 
 // ---------------------------------------------------------------------
+// Team & Access (admin only) — the member directory behind "add other
+// members/users" / "manage access". profiles_select's RLS lets an
+// OE/admin caller see every row regardless of role (see 002_rls.sql),
+// so this is a plain select; emails come separately from the
+// admin-users edge function (auth.admin.listMemberEmails() in auth.js)
+// since auth.users isn't queryable from the browser.
+// ---------------------------------------------------------------------
+export async function listAllProfiles() {
+  const { data, error } = await supabase.from("profiles").select("*, company:company_id(id,name,slug)").order("full_name");
+  if (error) throw error;
+  return data;
+}
+
+// Admin editing someone else's role/company/title — allowed by
+// profiles_update_admin (using private.is_admin(), no with-check, so any
+// column can change). Self-service edits go through updateMyProfile()
+// in auth.js instead, which is scoped to auth.uid() server-side.
+export async function updateProfileAsAdmin(id, patch) {
+  const { error } = await supabase.from("profiles").update(patch).eq("id", id);
+  if (error) throw error;
+}
+
+// ---------------------------------------------------------------------
 // Realtime — subscribe once per company/table pair; call the returned
 // unsubscribe() on route change / unmount. This is what makes two
 // members' browsers actually converge, which a static JS array never could.

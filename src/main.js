@@ -9,7 +9,10 @@
 // universe, federal-validation quotes) has no schema table yet — it's
 // intentionally left out of this port rather than hard-coded back in; see
 // README "What's NOT in here yet" for the follow-up decision this needs.
-import { signInWithPassword, signOut, getSession, getMyProfile, onAuthChange } from "./lib/auth.js";
+import {
+  signInWithPassword, signOut, getSession, getMyProfile, onAuthChange,
+  updateMyProfile, changeMyPassword, inviteMember, listMemberEmails, adminSetPassword,
+} from "./lib/auth.js";
 import {
   listCompanies, getCompany,
   listRequests, createRequest, volunteerForRequest,
@@ -20,6 +23,7 @@ import {
   listKpis, listFinancials,
   listWins, listChallenges, listPriorities,
   getMemberDashboard,
+  listAllProfiles, updateProfileAsAdmin,
   subscribeToCompanyActivity,
 } from "./lib/api.js";
 // Not wired up in this pass (no UI calls it yet): postEngineThread — exists
@@ -36,6 +40,9 @@ let SHORTCUTS_EXPANDED = false;
 
 function isOE() {
   return PROFILE && (PROFILE.role === "admin" || PROFILE.role === "oe_member");
+}
+function isAdmin() {
+  return PROFILE && PROFILE.role === "admin";
 }
 
 // ---------------------------------------------------------------------
@@ -159,6 +166,7 @@ document.getElementById("logout-link").addEventListener("click", async () => {
 document.getElementById("brand-home").addEventListener("click", () => { location.hash = "#/portfolio"; });
 document.getElementById("mobile-menu-btn").addEventListener("click", toggleMobileSidebar);
 document.getElementById("sidebar-backdrop").addEventListener("click", closeMobileSidebar);
+document.getElementById("side-user").addEventListener("click", () => openModal("my-account"));
 function toggleMobileSidebar() {
   document.querySelector(".sidebar").classList.toggle("mobile-open");
   document.getElementById("sidebar-backdrop").classList.toggle("active");
@@ -219,6 +227,7 @@ function toggleShortcutPin(id) {
 async function renderSideNav() {
   const items = [{ id: "portfolio", label: isOE() ? "Portfolio of My Interests" : "My Company", icon: "&#9733;", route: "#/portfolio" }];
   if (isOE()) items.push({ id: "engine", label: "My Opportunity Engine", icon: "&#9881;", route: "#/engine" });
+  if (isAdmin()) items.push({ id: "team", label: "Team & Access", icon: "&#128101;", route: "#/team" });
   const hash = location.hash || "#/portfolio";
   const current = hash.split("/")[1];
   const navHtml = items.map((n) => `
@@ -355,16 +364,195 @@ function modalConfirmHtml(title, text) {
       <button class="btn btn-primary" style="margin-top:18px;" id="modal-done">Done</button>
     </div>`;
 }
-function wireModalDone(refreshSidebar) {
+function wireModalDone(afterFn) {
   document.getElementById("modal-done").addEventListener("click", () => {
     closeModal();
-    if (refreshSidebar) { renderSideStats(); renderSideNav(); }
+    if (afterFn) afterFn();
   });
 }
 
-function openModal(kind) {
+const ROLE_LABEL = { oe_member: "OE Member", portco_contact: "Portfolio Company Contact", admin: "Admin" };
+function generateTempPassword() {
+  const bytes = crypto.getRandomValues(new Uint8Array(9));
+  const b64 = btoa(String.fromCharCode(...bytes)).replace(/[^A-Za-z0-9]/g, "");
+  return "OE-" + b64.slice(0, 10) + "!";
+}
+
+function openModal(kind, ctx) {
   const card = document.getElementById("modal-card");
-  if (kind === "submit-opportunity") {
+  if (kind === "my-account") {
+    card.innerHTML = `
+      <div class="modal-head">
+        <div><div class="modal-title">My Account</div><div class="modal-sub">Update your profile, or change your password.</div></div>
+        <button class="modal-close" id="modal-close-btn">&times;</button>
+      </div>
+      <form id="modal-form">
+        <div class="modal-field"><label>Full name</label><input id="ma-name" value="${escapeHtml(PROFILE.full_name)}" required></div>
+        <div class="modal-field"><label>Title</label><input id="ma-title" value="${escapeHtml(PROFILE.title || "")}"></div>
+        <div class="modal-field"><label>Focus</label><input id="ma-focus" value="${escapeHtml(PROFILE.focus || "")}"></div>
+        <div class="modal-field"><label>New password <span style="font-weight:400; text-transform:none;">(leave blank to keep it)</span></label><input id="ma-password" type="password" placeholder="At least 8 characters"></div>
+        <div class="login-error active" id="modal-error" style="display:none;"></div>
+        <div class="modal-foot"><button type="button" class="btn" id="modal-cancel-btn">Cancel</button><button type="submit" class="btn btn-accent">Save</button></div>
+      </form>`;
+    document.getElementById("modal-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errEl = document.getElementById("modal-error");
+      const fullName = document.getElementById("ma-name").value.trim();
+      const title = document.getElementById("ma-title").value.trim();
+      const focus = document.getElementById("ma-focus").value.trim();
+      const password = document.getElementById("ma-password").value;
+      if (password && password.length < 8) {
+        errEl.textContent = "Password must be at least 8 characters.";
+        errEl.style.display = "block";
+        return;
+      }
+      try {
+        await updateMyProfile({ fullName, title, focus });
+        if (password) await changeMyPassword(password);
+        PROFILE = await getMyProfile();
+        renderSidebarUser();
+        card.innerHTML = modalConfirmHtml("Saved", password ? "Your profile and password were updated." : "Your profile was updated.");
+        wireModalDone(() => { renderSideStats(); renderSideNav(); });
+      } catch (err) {
+        errEl.textContent = err.message || String(err);
+        errEl.style.display = "block";
+      }
+    });
+  } else if (kind === "invite-member") {
+    card.innerHTML = `
+      <div class="modal-head">
+        <div><div class="modal-title">Invite a Member</div><div class="modal-sub">Sends a real invite email. They'll set their own password on first sign-in.</div></div>
+        <button class="modal-close" id="modal-close-btn">&times;</button>
+      </div>
+      <form id="modal-form">
+        <div class="modal-field"><label>Email</label><input id="im-email" type="email" required></div>
+        <div class="modal-field"><label>Full name</label><input id="im-name" required></div>
+        <div class="modal-field"><label>Role</label>
+          <select id="im-role">
+            <option value="oe_member">OE Member</option>
+            <option value="admin">Admin</option>
+            <option value="portco_contact">Portfolio Company Contact</option>
+          </select>
+        </div>
+        <div class="modal-field" id="im-company-field" style="display:none;">
+          <label>Company</label>
+          <select id="im-company">${(COMPANIES_CACHE || []).map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("")}</select>
+        </div>
+        <div class="login-error active" id="modal-error" style="display:none;"></div>
+        <div class="modal-foot"><button type="button" class="btn" id="modal-cancel-btn">Cancel</button><button type="submit" class="btn btn-accent">Send Invite</button></div>
+      </form>`;
+    document.getElementById("im-role").addEventListener("change", (e) => {
+      document.getElementById("im-company-field").style.display = e.target.value === "portco_contact" ? "block" : "none";
+    });
+    document.getElementById("modal-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errEl = document.getElementById("modal-error");
+      const email = document.getElementById("im-email").value.trim();
+      const fullName = document.getElementById("im-name").value.trim();
+      const role = document.getElementById("im-role").value;
+      const companyId = role === "portco_contact" ? document.getElementById("im-company").value : null;
+      if (role === "portco_contact" && !companyId) {
+        errEl.textContent = "Choose a company for a portfolio-company contact.";
+        errEl.style.display = "block";
+        return;
+      }
+      try {
+        await inviteMember({ email, fullName, role, companyId });
+        card.innerHTML = modalConfirmHtml("Invited", `${fullName} will receive an invite email at ${email}.`);
+        wireModalDone(() => renderTeam());
+      } catch (err) {
+        errEl.textContent = err.message || String(err);
+        errEl.style.display = "block";
+      }
+    });
+  } else if (kind === "edit-member") {
+    const p = ctx;
+    card.innerHTML = `
+      <div class="modal-head">
+        <div><div class="modal-title">Edit ${escapeHtml(p.full_name)}</div><div class="modal-sub">Change their role, company assignment, or title.</div></div>
+        <button class="modal-close" id="modal-close-btn">&times;</button>
+      </div>
+      <form id="modal-form">
+        <div class="modal-field"><label>Full name</label><input id="em-name" value="${escapeHtml(p.full_name)}" required></div>
+        <div class="modal-field"><label>Title</label><input id="em-title" value="${escapeHtml(p.title || "")}"></div>
+        <div class="modal-field"><label>Role</label>
+          <select id="em-role">
+            <option value="oe_member" ${p.role === "oe_member" ? "selected" : ""}>OE Member</option>
+            <option value="admin" ${p.role === "admin" ? "selected" : ""}>Admin</option>
+            <option value="portco_contact" ${p.role === "portco_contact" ? "selected" : ""}>Portfolio Company Contact</option>
+          </select>
+        </div>
+        <div class="modal-field" id="em-company-field" style="${p.role === "portco_contact" ? "" : "display:none;"}">
+          <label>Company</label>
+          <select id="em-company">${(COMPANIES_CACHE || []).map((c) => `<option value="${c.id}" ${c.id === p.company_id ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}</select>
+        </div>
+        <div class="login-error active" id="modal-error" style="display:none;"></div>
+        <div class="modal-foot"><button type="button" class="btn" id="modal-cancel-btn">Cancel</button><button type="submit" class="btn btn-accent">Save Changes</button></div>
+      </form>`;
+    document.getElementById("em-role").addEventListener("change", (e) => {
+      document.getElementById("em-company-field").style.display = e.target.value === "portco_contact" ? "block" : "none";
+    });
+    document.getElementById("modal-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errEl = document.getElementById("modal-error");
+      const fullName = document.getElementById("em-name").value.trim();
+      const title = document.getElementById("em-title").value.trim();
+      const role = document.getElementById("em-role").value;
+      const companyId = role === "portco_contact" ? document.getElementById("em-company").value : null;
+      if (role === "portco_contact" && !companyId) {
+        errEl.textContent = "Choose a company for a portfolio-company contact.";
+        errEl.style.display = "block";
+        return;
+      }
+      try {
+        await updateProfileAsAdmin(p.id, { full_name: fullName, title, role, company_id: companyId });
+        card.innerHTML = modalConfirmHtml("Saved", `${fullName}'s access was updated.`);
+        wireModalDone(() => renderTeam());
+      } catch (err) {
+        errEl.textContent = err.message || String(err);
+        errEl.style.display = "block";
+      }
+    });
+  } else if (kind === "reset-password") {
+    const p = ctx;
+    card.innerHTML = `
+      <div class="modal-head">
+        <div><div class="modal-title">Reset Password — ${escapeHtml(p.full_name)}</div><div class="modal-sub">Sets a new password immediately. Share it with them directly — this does not send an email.</div></div>
+        <button class="modal-close" id="modal-close-btn">&times;</button>
+      </div>
+      <form id="modal-form">
+        <div class="modal-field">
+          <label>New password</label>
+          <div style="display:flex; gap:8px;">
+            <input id="rp-password" type="text" minlength="8" required style="flex:1;">
+            <button type="button" class="btn btn-sm" id="rp-generate" style="flex-shrink:0;">Generate</button>
+          </div>
+        </div>
+        <div class="login-error active" id="modal-error" style="display:none;"></div>
+        <div class="modal-foot"><button type="button" class="btn" id="modal-cancel-btn">Cancel</button><button type="submit" class="btn btn-accent">Set Password</button></div>
+      </form>`;
+    document.getElementById("rp-generate").addEventListener("click", () => {
+      document.getElementById("rp-password").value = generateTempPassword();
+    });
+    document.getElementById("modal-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errEl = document.getElementById("modal-error");
+      const password = document.getElementById("rp-password").value;
+      if (password.length < 8) {
+        errEl.textContent = "Password must be at least 8 characters.";
+        errEl.style.display = "block";
+        return;
+      }
+      try {
+        await adminSetPassword(p.id, password);
+        card.innerHTML = modalConfirmHtml("Password set", `${p.full_name}'s new password is: ${password} — share this with them directly, it won't be shown again.`);
+        wireModalDone(() => renderTeam());
+      } catch (err) {
+        errEl.textContent = err.message || String(err);
+        errEl.style.display = "block";
+      }
+    });
+  } else if (kind === "submit-opportunity") {
     const sectors = [...new Set((COMPANIES_CACHE || []).map((c) => c.sector).filter(Boolean))];
     card.innerHTML = `
       <div class="modal-head">
@@ -392,7 +580,7 @@ function openModal(kind) {
       try {
         await proposeSession({ kind: "pitch", companyId: null, title: `Screening: ${name} — ${desc}`, format: "Initial Screen", presenter: PROFILE.full_name });
         card.innerHTML = modalConfirmHtml("Submitted", `${name} was added to the screening calendar on My Opportunity Engine. Submitted by ${PROFILE.full_name} · ${rel.toLowerCase()}.`);
-        wireModalDone(true);
+        wireModalDone(() => { renderSideStats(); renderSideNav(); });
       } catch (err) {
         errEl.textContent = err.message || String(err);
         errEl.style.display = "block";
@@ -427,7 +615,7 @@ function openModal(kind) {
       try {
         await createRequest({ companyId, type: "intro", title: `Connect: ${who}`, body: context || `${type} requested on behalf of ${companyName}.` });
         card.innerHTML = modalConfirmHtml("Request posted", `Posted to ${companyName}'s Collaboration & Requests board. Members can volunteer to make the introduction.`);
-        wireModalDone(true);
+        wireModalDone(() => { renderSideStats(); renderSideNav(); });
       } catch (err) {
         errEl.textContent = err.message || String(err);
         errEl.style.display = "block";
@@ -451,7 +639,7 @@ function openModal(kind) {
       const name = document.getElementById("rm-name").value.trim();
       if (!name) return;
       card.innerHTML = modalConfirmHtml("Recommendation sent", `Thanks — ${name} has been forwarded to ${PORTFOLIO_GM_NAME} for review.`);
-      wireModalDone(false);
+      wireModalDone(null);
     });
   } else {
     return;
@@ -477,6 +665,8 @@ function route() {
     renderDeepDive(parts[1], parts[2] || "overview");
   } else if (parts[0] === "engine") {
     renderEngine(parts[1] || "flow");
+  } else if (parts[0] === "team") {
+    renderTeam();
   } else {
     renderPortfolio();
   }
@@ -896,6 +1086,61 @@ async function renderEngineDirectory(body) {
       <div class="card-head"><div class="card-title">Engine Directory</div><div class="card-sub">Internal cross-portfolio discussion — never visible to portfolio-company contacts.</div></div>
       ${items || `<div class="empty-note">No engine discussion yet.</div>`}
     </div>`;
+}
+
+// ---------------------------------------------------------------------
+// Team & Access (admin only) — account administration: who has access,
+// what role/company they're scoped to, inviting new members, and
+// resetting a password when someone's locked out. profiles_select's RLS
+// already lets an admin (any OE member, really) read every row
+// regardless of role; emails come separately from the admin-users edge
+// function since auth.users isn't queryable from the browser.
+// ---------------------------------------------------------------------
+async function renderTeam() {
+  if (!isAdmin()) { location.hash = "#/portfolio"; return; }
+  setTopbar("Team & Access", "Everyone with access to this platform — members, admins, and portfolio-company contacts.");
+  setContent(loadingHtml("team"));
+  if (!COMPANIES_CACHE) {
+    try { COMPANIES_CACHE = await listCompanies(); } catch { COMPANIES_CACHE = []; }
+  }
+  let profiles, emails;
+  try {
+    const [profilesResult, emailsResult] = await Promise.all([listAllProfiles(), listMemberEmails().catch(() => ({}))]);
+    profiles = profilesResult;
+    emails = emailsResult;
+  } catch (err) {
+    setContent(errorHtml(err));
+    return;
+  }
+  const rows = profiles.map((p) => `
+    <tr>
+      <td><b>${escapeHtml(p.full_name)}</b>${p.title ? `<div style="color:var(--ink-muted); font-size:11px;">${escapeHtml(p.title)}</div>` : ""}</td>
+      <td>${escapeHtml(emails[p.id]?.email || "—")}</td>
+      <td><span class="chip">${escapeHtml(ROLE_LABEL[p.role] || p.role)}</span></td>
+      <td>${escapeHtml(p.company?.name || "—")}</td>
+      <td style="text-align:right; white-space:nowrap;">
+        <button class="btn btn-sm" data-edit-member="${p.id}">Edit</button>
+        <button class="btn btn-sm" data-reset-pw="${p.id}">Reset password</button>
+      </td>
+    </tr>`).join("");
+  setContent(`
+    <div class="card card-pad">
+      <div class="card-head">
+        <div><div class="card-title">Members</div><div class="card-sub">${profiles.length} ${profiles.length === 1 ? "person has" : "people have"} access.</div></div>
+        <button class="btn btn-accent btn-sm" id="team-invite-btn">+ Invite a member</button>
+      </div>
+      <table class="data-table">
+        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Company</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`);
+  document.getElementById("team-invite-btn").addEventListener("click", () => openModal("invite-member"));
+  document.querySelectorAll("[data-edit-member]").forEach((el) => {
+    el.addEventListener("click", () => openModal("edit-member", profiles.find((p) => p.id === el.dataset.editMember)));
+  });
+  document.querySelectorAll("[data-reset-pw]").forEach((el) => {
+    el.addEventListener("click", () => openModal("reset-password", profiles.find((p) => p.id === el.dataset.resetPw)));
+  });
 }
 
 // ---------------------------------------------------------------------
