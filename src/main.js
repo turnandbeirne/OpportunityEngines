@@ -15,19 +15,19 @@ import {
 } from "./lib/auth.js";
 import {
   listCompanies, getCompany,
-  listRequests, createRequest, volunteerForRequest,
-  listThreads, postThread,
-  listEngineThreads,
+  listRequests, createRequest, volunteerForRequest, deleteRequest,
+  listThreads, postThread, deleteThread,
+  listEngineThreads, postEngineThread, deleteEngineThread,
   listPulseCalls, listFlowEvents, proposeSession,
   getValuation,
   listKpis, listFinancials,
   listWins, listChallenges, listPriorities,
   getMemberDashboard,
-  listAllProfiles, updateProfileAsAdmin,
+  listAllProfiles, updateProfileAsAdmin, listMentionableMembers,
+  createNotification, listMyNotifications, countUnreadNotifications,
+  markNotificationRead, markAllNotificationsRead, subscribeToMyNotifications,
   subscribeToCompanyActivity,
 } from "./lib/api.js";
-// Not wired up in this pass (no UI calls it yet): postEngineThread — exists
-// in api.js, ready when the Engine Directory gets a "start a thread" form.
 
 // ---------------------------------------------------------------------
 // State
@@ -35,6 +35,7 @@ import {
 let PROFILE = null; // { id, full_name, initials, role, title, focus, color, company_id }
 let COMPANIES_CACHE = null; // refreshed on each /portfolio visit; also used by the sidebar's Deep Dive Shortcuts
 let ACTIVITY_UNSUB = null;
+let NOTIF_UNSUB = null;
 let PINNED_SHORTCUTS = null; // company ids pinned in the sidebar's Deep Dive Shortcuts — session-local, like the prototype
 let SHORTCUTS_EXPANDED = false;
 
@@ -130,6 +131,9 @@ function showApp() {
   renderSideNav();
   renderSideStats();
   renderSideAsk();
+  refreshNotifBadge();
+  if (NOTIF_UNSUB) NOTIF_UNSUB();
+  NOTIF_UNSUB = subscribeToMyNotifications(PROFILE.id, refreshNotifBadge);
   route();
 }
 
@@ -154,9 +158,11 @@ document.getElementById("login-form").addEventListener("submit", async (e) => {
 
 document.getElementById("logout-link").addEventListener("click", async () => {
   if (ACTIVITY_UNSUB) { ACTIVITY_UNSUB(); ACTIVITY_UNSUB = null; }
+  if (NOTIF_UNSUB) { NOTIF_UNSUB(); NOTIF_UNSUB = null; }
   await signOut();
   PROFILE = null;
   COMPANIES_CACHE = null;
+  MENTIONABLE_CACHE = null;
   PINNED_SHORTCUTS = null;
   SHORTCUTS_EXPANDED = false;
   location.hash = "";
@@ -185,8 +191,11 @@ onAuthChange((session) => {
   if (session && !PROFILE) {
     boot();
   } else if (!session && PROFILE) {
+    if (ACTIVITY_UNSUB) { ACTIVITY_UNSUB(); ACTIVITY_UNSUB = null; }
+    if (NOTIF_UNSUB) { NOTIF_UNSUB(); NOTIF_UNSUB = null; }
     PROFILE = null;
     COMPANIES_CACHE = null;
+    MENTIONABLE_CACHE = null;
     PINNED_SHORTCUTS = null;
     SHORTCUTS_EXPANDED = false;
     showLogin();
@@ -651,6 +660,185 @@ function openModal(kind, ctx) {
 }
 
 // ---------------------------------------------------------------------
+// @mentions, delete confirmation, notifications bell, global search —
+// the community-management layer on top of 003_community.sql.
+// ---------------------------------------------------------------------
+let MENTIONABLE_CACHE = null;
+async function getMentionableMembers() {
+  if (!MENTIONABLE_CACHE) {
+    try { MENTIONABLE_CACHE = await listMentionableMembers(); } catch (err) { console.error("Failed to load member list", err); MENTIONABLE_CACHE = []; }
+  }
+  return MENTIONABLE_CACHE;
+}
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Scans posted text for "@Full Name" against the cached member list and
+// creates a notification for each real match. Client-side regex against a
+// name list rather than a DB trigger/NLP — the member set is small enough
+// that this is simple and reliable. Silently skips anyone a failed insert
+// would affect (e.g. an RLS edge case) rather than surfacing a scary error
+// after an otherwise-successful post — see createNotification() in api.js.
+async function notifyMentions(text, { companyId, link, type = "mention" } = {}) {
+  if (!text || text.indexOf("@") === -1 || !PROFILE) return;
+  let members;
+  try { members = await getMentionableMembers(); } catch { return; }
+  const mentioned = members.filter((m) => m.id !== PROFILE.id && m.full_name && new RegExp("@" + escapeRegExp(m.full_name), "i").test(text));
+  const snippet = text.length > 120 ? text.slice(0, 120) + "…" : text;
+  for (const m of mentioned) {
+    try {
+      await createNotification({
+        recipientId: m.id, actorId: PROFILE.id, type, companyId: companyId || null,
+        message: `${PROFILE.full_name} mentioned you: "${snippet}"`,
+        link: link || null,
+      });
+    } catch (err) { console.error("Failed to notify", m.full_name, err); }
+  }
+}
+
+// Two-click delete: first click arms the control for 3s ("Confirm
+// delete?"), a second click within that window calls onConfirm(). No
+// native confirm() dialog — those block the page and can't be styled.
+function wireConfirmDelete(el, onConfirm) {
+  const label = el.textContent;
+  let armed = false, timer = null;
+  function reset() {
+    armed = false;
+    clearTimeout(timer);
+    el.textContent = label;
+    el.style.color = "";
+    el.style.borderColor = "";
+    el.disabled = false;
+  }
+  el.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!armed) {
+      armed = true;
+      el.textContent = "Confirm delete?";
+      el.style.color = "var(--critical)";
+      el.style.borderColor = "var(--critical)";
+      timer = setTimeout(reset, 3000);
+      return;
+    }
+    clearTimeout(timer);
+    el.disabled = true;
+    try {
+      await onConfirm();
+    } catch (err) {
+      console.error("Delete failed", err);
+      el.textContent = "Failed — retry";
+      timer = setTimeout(reset, 2500);
+    }
+  });
+}
+
+// ---- Notifications bell ----
+async function refreshNotifBadge() {
+  if (!PROFILE) return;
+  try {
+    const count = await countUnreadNotifications();
+    document.getElementById("notif-badge").style.display = count > 0 ? "block" : "none";
+  } catch (err) { console.error("Failed to refresh notification badge", err); }
+}
+function notifIcon(type) {
+  return type === "volunteer" ? "&#129309;" : "@";
+}
+async function toggleNotifPanel() {
+  const panel = document.getElementById("notif-panel");
+  const opening = !panel.classList.contains("active");
+  document.getElementById("search-results").classList.remove("active");
+  if (!opening) { panel.classList.remove("active"); return; }
+  panel.classList.add("active");
+  panel.innerHTML = `<div class="notif-panel-head">Notifications</div><div class="loading-note" style="padding:14px;">Loading…</div>`;
+  let items;
+  try {
+    items = await listMyNotifications();
+  } catch (err) {
+    panel.innerHTML = `<div class="notif-panel-head">Notifications</div><div class="error-note" style="padding:14px;">Couldn't load notifications.</div>`;
+    return;
+  }
+  panel.innerHTML = `
+    <div class="notif-panel-head" style="display:flex; align-items:center; justify-content:space-between;">
+      <span>Notifications</span>
+      ${items.some((n) => !n.read) ? `<span id="notif-mark-all" style="cursor:pointer; color:var(--gold); text-transform:none; font-weight:700;">Mark all read</span>` : ""}
+    </div>
+    ${items.length ? items.map((n) => `
+      <div class="notif-item" data-notif="${n.id}" data-link="${escapeHtml(n.link || "")}" style="${n.read ? "" : "background:var(--surface-2);"}">
+        <div class="notif-ic" style="background:${n.actor?.color || "var(--navy-900)"}; color:#fff;">${notifIcon(n.type)}</div>
+        <div>
+          <div class="notif-text">${escapeHtml(n.message)}</div>
+          <div class="notif-time">${fmtDateTime(n.created_at)}</div>
+        </div>
+      </div>`).join("") : `<div class="empty-note" style="padding:14px;">No notifications yet.</div>`}`;
+  const markAll = document.getElementById("notif-mark-all");
+  if (markAll) markAll.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    await markAllNotificationsRead();
+    refreshNotifBadge();
+    panel.classList.remove("active");
+  });
+  panel.querySelectorAll("[data-notif]").forEach((el) => {
+    el.addEventListener("click", async () => {
+      await markNotificationRead(el.dataset.notif).catch(() => {});
+      refreshNotifBadge();
+      panel.classList.remove("active");
+      if (el.dataset.link) location.hash = el.dataset.link;
+    });
+  });
+}
+document.getElementById("notif-bell").addEventListener("click", (e) => { e.stopPropagation(); toggleNotifPanel(); });
+document.addEventListener("click", (e) => {
+  const wrap = document.getElementById("notif-wrap");
+  if (wrap && !wrap.contains(e.target)) document.getElementById("notif-panel").classList.remove("active");
+});
+
+// ---- Global search (companies always; members too for OE/admin) ----
+async function handleGlobalSearch(e) {
+  const raw = e.target.value.trim();
+  const q = raw.toLowerCase();
+  const results = document.getElementById("search-results");
+  if (!q) { results.classList.remove("active"); results.innerHTML = ""; return; }
+  if (!COMPANIES_CACHE) { try { COMPANIES_CACHE = await listCompanies(); } catch { COMPANIES_CACHE = []; } }
+  const companyHits = (COMPANIES_CACHE || []).filter((c) => c.name.toLowerCase().includes(q)).slice(0, 5);
+  let memberHits = [];
+  if (isOE()) {
+    let members = [];
+    try { members = await getMentionableMembers(); } catch { members = []; }
+    memberHits = members.filter((m) => (m.full_name || "").toLowerCase().includes(q)).slice(0, 5);
+  }
+  if (!companyHits.length && !memberHits.length) {
+    results.innerHTML = `<div class="search-result-item" style="cursor:default;"><div class="search-result-meta">No matches for "${escapeHtml(raw)}"</div></div>`;
+    results.classList.add("active");
+    return;
+  }
+  results.innerHTML = `
+    ${companyHits.map((c) => `
+      <div class="search-result-item" data-goto="#/company/${escapeHtml(c.slug)}">
+        <div class="co-logo" style="width:28px; height:28px; font-size:11px; background:${escapeHtml(c.logo_color || "var(--navy-900)")}">${escapeHtml(c.short_code || "")}</div>
+        <div><div class="search-result-name">${escapeHtml(c.name)}</div><div class="search-result-meta">${escapeHtml(c.sector || "Company")}</div></div>
+      </div>`).join("")}
+    ${memberHits.map((m) => `
+      <div class="search-result-item" data-goto="${isAdmin() ? "#/team" : ""}">
+        <div class="avatar-sm" style="background:${m.color || "var(--navy-900)"};">${escapeHtml(m.initials || initialsOf(m.full_name))}</div>
+        <div><div class="search-result-name">${escapeHtml(m.full_name)}</div><div class="search-result-meta">${escapeHtml(ROLE_LABEL[m.role] || m.role)}</div></div>
+      </div>`).join("")}`;
+  results.classList.add("active");
+  results.querySelectorAll("[data-goto]").forEach((el) => {
+    el.addEventListener("click", () => {
+      if (el.dataset.goto) location.hash = el.dataset.goto;
+      results.classList.remove("active");
+      document.getElementById("global-search").value = "";
+    });
+  });
+}
+document.getElementById("global-search").addEventListener("input", handleGlobalSearch);
+document.addEventListener("click", (e) => {
+  const wrap = document.querySelector(".search-box-wrap");
+  if (wrap && !wrap.contains(e.target)) document.getElementById("search-results").classList.remove("active");
+});
+
+// ---------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------
 window.addEventListener("hashchange", route);
@@ -938,7 +1126,10 @@ async function renderDDCollab(body, c) {
       <div class="req-body">${escapeHtml(r.body || "")}</div>
       <div class="req-foot">
         <div class="chip-row">${(r.volunteers || []).map((v) => `<span class="chip">${escapeHtml(v.member?.full_name || "member")}</span>`).join("") || '<span class="co-sector">No volunteers yet</span>'}</div>
-        <button class="btn btn-sm" data-volunteer="${r.id}">Volunteer</button>
+        <div style="display:flex; gap:8px;">
+          ${isAdmin() || r.posted_by === PROFILE.id ? `<button class="btn btn-sm" data-delete-request="${r.id}">Delete</button>` : ""}
+          <button class="btn btn-sm" data-volunteer="${r.id}">Volunteer</button>
+        </div>
       </div>
     </div>`).join("");
   body.innerHTML = `
@@ -956,7 +1147,7 @@ async function renderDDCollab(body, c) {
             <option value="other">Other</option>
           </select>
         </div>
-        <div class="modal-field"><label>Details</label><textarea name="body"></textarea></div>
+        <div class="modal-field"><label>Details <span style="font-weight:400; text-transform:none;">(use @Full Name to notify someone)</span></label><textarea name="body"></textarea></div>
         <button class="btn btn-accent" type="submit">Post request</button>
       </form>
     </div>
@@ -964,12 +1155,28 @@ async function renderDDCollab(body, c) {
   document.getElementById("new-request-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
-    await createRequest({ companyId: c.id, type: fd.get("type"), title: fd.get("title"), body: fd.get("body") });
+    const bodyText = fd.get("body");
+    await createRequest({ companyId: c.id, type: fd.get("type"), title: fd.get("title"), body: bodyText });
+    notifyMentions(bodyText, { companyId: c.id, link: `#/company/${c.slug}/collab` });
     await renderDDCollab(body, c);
   });
   body.querySelectorAll("[data-volunteer]").forEach((btn) => {
     btn.addEventListener("click", async () => {
+      const r = requests.find((x) => x.id === btn.dataset.volunteer);
       await volunteerForRequest(btn.dataset.volunteer);
+      if (r && r.posted_by && r.posted_by !== PROFILE.id) {
+        createNotification({
+          recipientId: r.posted_by, actorId: PROFILE.id, type: "volunteer", companyId: c.id,
+          message: `${PROFILE.full_name} volunteered for "${r.title}"`,
+          link: `#/company/${c.slug}/collab`,
+        }).catch((err) => console.error("Failed to notify volunteer", err));
+      }
+      await renderDDCollab(body, c);
+    });
+  });
+  body.querySelectorAll("[data-delete-request]").forEach((btn) => {
+    wireConfirmDelete(btn, async () => {
+      await deleteRequest(btn.dataset.deleteRequest);
       await renderDDCollab(body, c);
     });
   });
@@ -985,6 +1192,7 @@ async function renderDDDealroom(body, c) {
           <span class="thread-name">${escapeHtml(t.author?.full_name || "Unknown")}</span>
           ${t.tag ? `<span class="pill ${escapeHtml(t.tag_class || "pill-considering")}">${escapeHtml(t.tag)}</span>` : ""}
           <span class="thread-time">${fmtDateTime(t.created_at)}</span>
+          ${isAdmin() || t.author_id === PROFILE.id ? `<span class="thread-time" data-delete-thread="${t.id}" style="margin-left:auto; cursor:pointer; color:var(--critical);">Delete</span>` : ""}
         </div>
         <div class="thread-text">${escapeHtml(t.body)}</div>
       </div>
@@ -994,15 +1202,23 @@ async function renderDDDealroom(body, c) {
       <div class="card-head"><div class="card-title">Deal Room</div></div>
       ${items || `<div class="empty-note">No notes yet.</div>`}
       <div class="comment-input">
-        <textarea id="new-thread-body" placeholder="Add a note…"></textarea>
+        <textarea id="new-thread-body" placeholder="Add a note… (use @Full Name to notify someone)"></textarea>
         <button class="btn btn-accent" id="new-thread-submit">Post</button>
       </div>
     </div>`;
   document.getElementById("new-thread-submit").addEventListener("click", async () => {
     const ta = document.getElementById("new-thread-body");
     if (!ta.value.trim()) return;
-    await postThread({ companyId: c.id, body: ta.value.trim() });
+    const text = ta.value.trim();
+    await postThread({ companyId: c.id, body: text });
+    notifyMentions(text, { companyId: c.id, link: `#/company/${c.slug}/dealroom` });
     await renderDDDealroom(body, c);
+  });
+  body.querySelectorAll("[data-delete-thread]").forEach((el) => {
+    wireConfirmDelete(el, async () => {
+      await deleteThread(el.dataset.deleteThread);
+      await renderDDDealroom(body, c);
+    });
   });
 }
 
@@ -1013,6 +1229,7 @@ const ENGINE_TABS = [
   { id: "flow", label: "Deal Flow" },
   { id: "pulse", label: "Pulse Calls" },
   { id: "directory", label: "Engine Directory" },
+  { id: "members", label: "Members" },
 ];
 
 async function renderEngine(tab) {
@@ -1029,7 +1246,8 @@ async function renderEngine(tab) {
   try {
     if (validTab === "flow") await renderEngineFlow(body);
     else if (validTab === "pulse") await renderEnginePulse(body);
-    else await renderEngineDirectory(body);
+    else if (validTab === "directory") await renderEngineDirectory(body);
+    else await renderEngineMembers(body);
   } catch (err) {
     body.innerHTML = errorHtml(err);
   }
@@ -1076,15 +1294,74 @@ async function renderEngineDirectory(body) {
     <div class="thread-item">
       <div class="avatar-sm">${escapeHtml(t.author?.initials || initialsOf(t.author?.full_name))}</div>
       <div class="thread-body">
-        <div class="thread-head"><span class="thread-name">${escapeHtml(t.topic)}</span><span class="thread-time">${fmtDateTime(t.created_at)}</span></div>
+        <div class="thread-head">
+          <span class="thread-name">${escapeHtml(t.topic)}</span>
+          <span class="thread-time">by ${escapeHtml(t.author?.full_name || "Unknown")} · ${fmtDateTime(t.created_at)}</span>
+          ${isAdmin() || t.author_id === PROFILE.id ? `<span class="thread-time" data-delete-engine-thread="${t.id}" style="margin-left:auto; cursor:pointer; color:var(--critical);">Delete</span>` : ""}
+        </div>
         <div class="thread-text">${escapeHtml(t.body)}</div>
         <div class="chip-row" style="margin-top:6px;">${(t.companies || []).map((cc) => `<span class="chip">${escapeHtml(cc.company?.name || "")}</span>`).join("")}</div>
       </div>
     </div>`).join("");
   body.innerHTML = `
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <div class="card-head"><div class="card-title">Start a discussion</div></div>
+      <form id="new-engine-thread-form">
+        <div class="modal-field"><label>Topic</label><input required name="topic"></div>
+        <div class="modal-field"><label>Details <span style="font-weight:400; text-transform:none;">(use @Full Name to notify someone)</span></label><textarea name="body" required></textarea></div>
+        <button class="btn btn-accent" type="submit">Post</button>
+      </form>
+    </div>
     <div class="card card-pad">
       <div class="card-head"><div class="card-title">Engine Directory</div><div class="card-sub">Internal cross-portfolio discussion — never visible to portfolio-company contacts.</div></div>
       ${items || `<div class="empty-note">No engine discussion yet.</div>`}
+    </div>`;
+  document.getElementById("new-engine-thread-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const topic = fd.get("topic");
+    const text = fd.get("body");
+    await postEngineThread({ topic, body: text });
+    notifyMentions(text, { link: "#/engine/directory" });
+    await renderEngineDirectory(body);
+  });
+  body.querySelectorAll("[data-delete-engine-thread]").forEach((el) => {
+    wireConfirmDelete(el, async () => {
+      await deleteEngineThread(el.dataset.deleteEngineThread);
+      await renderEngineDirectory(body);
+    });
+  });
+}
+
+// Read-only member directory, available to any OE member (not just
+// admins) — the counterpart to Team & Access's admin-only management view.
+async function renderEngineMembers(body) {
+  let profiles;
+  try {
+    profiles = await listAllProfiles();
+  } catch (err) {
+    body.innerHTML = errorHtml(err);
+    return;
+  }
+  const rows = profiles.map((p) => `
+    <tr>
+      <td>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div class="avatar-sm" style="background:${p.color || "var(--navy-900)"};">${escapeHtml(p.initials || initialsOf(p.full_name))}</div>
+          <div><b>${escapeHtml(p.full_name)}</b>${p.title ? `<div style="color:var(--ink-muted); font-size:11px;">${escapeHtml(p.title)}</div>` : ""}</div>
+        </div>
+      </td>
+      <td><span class="chip">${escapeHtml(ROLE_LABEL[p.role] || p.role)}</span></td>
+      <td>${escapeHtml(p.company?.name || "—")}</td>
+      <td>${escapeHtml(p.focus || "—")}</td>
+    </tr>`).join("");
+  body.innerHTML = `
+    <div class="card card-pad">
+      <div class="card-head"><div><div class="card-title">Members</div><div class="card-sub">${profiles.length} ${profiles.length === 1 ? "person has" : "people have"} access to the platform.</div></div></div>
+      <table class="data-table">
+        <thead><tr><th>Name</th><th>Role</th><th>Company</th><th>Focus</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
     </div>`;
 }
 

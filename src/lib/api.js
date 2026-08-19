@@ -84,7 +84,8 @@ export async function listRequests(companyId) {
   return data;
 }
 export async function createRequest({ companyId, type, title, body }) {
-  const { data, error } = await supabase.from("requests").insert({ company_id: companyId, type, title, body }).select().single();
+  const { data: { user } } = await supabase.auth.getUser();
+  const { data, error } = await supabase.from("requests").insert({ company_id: companyId, type, title, body, posted_by: user?.id || null }).select().single();
   if (error) throw error;
   return data;
 }
@@ -108,7 +109,8 @@ export async function listThreads(companyId) {
   return data;
 }
 export async function postThread({ companyId, body, tag = "Note", tagClass = "pill-considering" }) {
-  const { error } = await supabase.from("threads").insert({ company_id: companyId, body, tag, tag_class: tagClass });
+  const { data: { user } } = await supabase.auth.getUser();
+  const { error } = await supabase.from("threads").insert({ company_id: companyId, body, tag, tag_class: tagClass, author_id: user?.id || null });
   if (error) throw error;
 }
 export async function listEngineThreads() {
@@ -120,7 +122,8 @@ export async function listEngineThreads() {
   return data;
 }
 export async function postEngineThread({ topic, body }) {
-  const { error } = await supabase.from("engine_threads").insert({ topic, body });
+  const { data: { user } } = await supabase.auth.getUser();
+  const { error } = await supabase.from("engine_threads").insert({ topic, body, author_id: user?.id || null });
   if (error) throw error;
 }
 
@@ -259,6 +262,80 @@ export async function listAllProfiles() {
 // in auth.js instead, which is scoped to auth.uid() server-side.
 export async function updateProfileAsAdmin(id, patch) {
   const { error } = await supabase.from("profiles").update(patch).eq("id", id);
+  if (error) throw error;
+}
+
+// Lightweight member list for @mention matching — works for a portco
+// contact too (they'll just see OE/admin rows plus their own, per
+// profiles_select's RLS), not just admins.
+export async function listMentionableMembers() {
+  const { data, error } = await supabase.from("profiles").select("id, full_name, initials, color, role").order("full_name");
+  if (error) throw error;
+  return data;
+}
+
+// ---------------------------------------------------------------------
+// Notifications — @mentions and "someone volunteered for your request".
+// Created client-side right after a successful post/volunteer (see
+// notifyMentions()/the volunteer handler in main.js), not by a DB
+// trigger — see 003_community.sql for why (and for the RLS: any OE/admin
+// can create a notification FOR someone else, but only the recipient can
+// read or mark their own as read).
+// ---------------------------------------------------------------------
+export async function createNotification({ recipientId, actorId, type, companyId, message, link }) {
+  if (!recipientId || recipientId === actorId) return; // never notify yourself
+  const { error } = await supabase.from("notifications").insert({
+    recipient_id: recipientId, actor_id: actorId, type, company_id: companyId || null, message, link: link || null,
+  });
+  if (error) throw error;
+}
+export async function listMyNotifications(limit = 30) {
+  const { data, error } = await supabase
+    .from("notifications")
+    .select("*, actor:actor_id(full_name,initials,color)")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data;
+}
+export async function countUnreadNotifications() {
+  const { count, error } = await supabase.from("notifications").select("id", { count: "exact", head: true }).eq("read", false);
+  if (error) throw error;
+  return count || 0;
+}
+export async function markNotificationRead(id) {
+  const { error } = await supabase.from("notifications").update({ read: true }).eq("id", id);
+  if (error) throw error;
+}
+export async function markAllNotificationsRead() {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return;
+  const { error } = await supabase.from("notifications").update({ read: true }).eq("recipient_id", user.id).eq("read", false);
+  if (error) throw error;
+}
+export function subscribeToMyNotifications(userId, onChange) {
+  const channel = supabase
+    .channel(`notifications-${userId}`)
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "notifications", filter: `recipient_id=eq.${userId}` }, onChange)
+    .subscribe();
+  return () => supabase.removeChannel(channel);
+}
+
+// ---------------------------------------------------------------------
+// Moderation — delete your own post, or (admin) anyone's. Nothing could
+// be removed before this: 002_rls.sql never defined a delete policy for
+// any of these tables, so RLS silently denied every delete.
+// ---------------------------------------------------------------------
+export async function deleteThread(id) {
+  const { error } = await supabase.from("threads").delete().eq("id", id);
+  if (error) throw error;
+}
+export async function deleteRequest(id) {
+  const { error } = await supabase.from("requests").delete().eq("id", id);
+  if (error) throw error;
+}
+export async function deleteEngineThread(id) {
+  const { error } = await supabase.from("engine_threads").delete().eq("id", id);
   if (error) throw error;
 }
 

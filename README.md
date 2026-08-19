@@ -27,6 +27,11 @@ This is provisioned and seeded right now, not just source on disk:
 - **`invite-member` and `admin-users` edge functions:** deployed and
   active — real account administration (invite, list emails, reset a
   password), not just the seeded demo accounts.
+- **Community management:** applied (`003_community.sql`) — in-app
+  notifications for `@mentions` and "someone volunteered for your
+  request", plus moderation (delete your own post, or any post if you're
+  an admin) on requests/threads/engine threads, which previously had no
+  delete policy at all.
 - **Frontend:** the rendering code is ported from the HTML prototype's
   in-memory arrays to real async Supabase calls (see "What's in here" and
   "What's NOT in here yet" below for exact scope and what's still
@@ -109,6 +114,24 @@ Sign in at the app once it's deployed (or locally via `npm run dev`) with:
   your own password), and a "Team & Access" page for admins (member
   directory with real emails, invite a new member, edit anyone's
   role/company, reset anyone's password).
+
+  Community management, on top of all that: a real notifications table
+  (not a computed/synthetic one) with a topbar bell — `@mentioning`
+  someone by full name in a Collaboration request, Deal Room note, or
+  Engine Directory post notifies them, and volunteering for a request
+  notifies whoever posted it. A global search box in the topbar finds
+  companies (everyone) and members (OE/admin) and jumps straight there.
+  Moderation: delete your own request/thread/engine post, or (admin) any
+  of them, via a two-click "Confirm delete?" control — no native browser
+  dialogs. Engine Directory gained a "Start a discussion" post form (it
+  only supported reading before) and a read-only Members tab everyone on
+  the Opportunity Engine can see, separate from admin-only Team & Access.
+  One pre-existing bug fixed along the way: `createRequest`/`postThread`/
+  `postEngineThread` never actually set `posted_by`/`author_id`, so every
+  post's author showed as "Unknown" and nothing could ever be scoped to
+  "mine" — now fixed, and confirmed no existing live rows were affected
+  (all seeded data already had these set correctly; only rows created via
+  those three functions were ever null, and there were none).
 
 ## What's NOT in here yet
 
