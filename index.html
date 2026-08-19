@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Opportunity Engines · Portfolio Platform</title>
+<link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+
+<!-- ================= LOGIN ================= -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="brand-mark">
+      <div class="brand-star">&#9733;</div>
+      <div>
+        <div class="brand-name">Opportunity Engines</div>
+        <div class="brand-sub">Portfolio Platform</div>
+      </div>
+    </div>
+    <div class="login-title">Member sign-in</div>
+    <div class="login-desc">Real Supabase Auth — this signs you into the live database, not a demo.</div>
+    <form id="login-form">
+      <label class="field-label">Work email</label>
+      <input class="field-input" id="login-email" type="email" placeholder="you@acceleration-group.com" autocomplete="username" required>
+      <label class="field-label">Password</label>
+      <input class="field-input" id="login-pass" type="password" placeholder="••••••••••••" autocomplete="current-password" required>
+      <div class="login-error" id="login-error"></div>
+      <button class="btn-gold" type="submit" id="login-submit">Sign in</button>
+    </form>
+    <div class="mfa-chip"><span class="dot-live"></span> Live Supabase Auth · row-level security enforced server-side</div>
+    <div class="login-foot">Opportunity Engines Platform · connected to the live portfolio database</div>
+  </div>
+</div>
+
+<!-- ================= APP ================= -->
+<div id="app">
+  <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+  <div class="sidebar">
+    <div class="brand-mark" id="brand-home" title="Back to Portfolio of My Interests">
+      <div class="brand-star">&#9733;</div>
+      <div>
+        <div class="brand-name">Opportunity Engines</div>
+        <div class="brand-sub" style="color:#5c6480;">Portfolio Platform</div>
+      </div>
+    </div>
+    <div class="side-nav" id="side-nav"></div>
+    <div class="side-spacer"></div>
+    <div class="side-user" id="side-user"></div>
+    <div class="logout-link" id="logout-link">&larr; Sign out</div>
+  </div>
+  <div class="main">
+    <div class="topbar">
+      <div style="display:flex; align-items:center; min-width:0;">
+        <button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Open menu">&#9776;</button>
+        <div style="min-width:0;">
+          <div class="topbar-title" id="topbar-title">Portfolio of My Interests</div>
+          <div class="topbar-sub" id="topbar-sub">Every opportunity relevant to you that Opportunity Engines is invested in, advising, or considering.</div>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <div class="avatar" id="topbar-avatar" style="width:36px;height:36px;font-size:13px;"></div>
+      </div>
+    </div>
+    <div class="content" id="content"></div>
+  </div>
+</div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,210 @@
+// Data-access layer — every read/write the app needs, backed by
+// Supabase instead of the in-memory arrays the HTML prototype used.
+// RLS (see supabase/002_rls.sql) enforces access control server-side;
+// this file does not need to re-check roles, it just issues queries —
+// a portco contact calling listCompanies() simply gets one row back,
+// not because the client filtered anything, but because Postgres did.
+import { supabase } from "./supabaseClient.js";
+
+// ---------------------------------------------------------------------
+// Companies / portfolio
+// ---------------------------------------------------------------------
+export async function listCompanies() {
+  const { data, error } = await supabase.from("companies").select("*, sponsor:sponsor_id(id,full_name,initials,color)").order("name");
+  if (error) throw error;
+  return data;
+}
+export async function getCompany(slug) {
+  const { data, error } = await supabase.from("companies").select("*, sponsor:sponsor_id(id,full_name,initials,color)").eq("slug", slug).single();
+  if (error) throw error;
+  return data;
+}
+export async function listMyAllocations(memberId) {
+  const { data, error } = await supabase.from("allocations").select("*, company:company_id(*)").eq("member_id", memberId);
+  if (error) throw error;
+  return data;
+}
+
+// ---------------------------------------------------------------------
+// Collaboration board
+// ---------------------------------------------------------------------
+export async function listRequests(companyId) {
+  const { data, error } = await supabase
+    .from("requests")
+    .select("*, volunteers:request_volunteers(member_id, member:member_id(full_name,initials,color))")
+    .eq("company_id", companyId)
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return data;
+}
+export async function createRequest({ companyId, type, title, body }) {
+  const { data, error } = await supabase.from("requests").insert({ company_id: companyId, type, title, body }).select().single();
+  if (error) throw error;
+  return data;
+}
+export async function volunteerForRequest(requestId) {
+  const { data: { user } } = await supabase.auth.getUser();
+  const { error } = await supabase.from("request_volunteers").insert({ request_id: requestId, member_id: user.id });
+  if (error) throw error;
+  await supabase.from("requests").update({ status: "in-progress" }).eq("id", requestId).eq("status", "open");
+}
+
+// ---------------------------------------------------------------------
+// Threads (deal room notes + cross-portfolio Engine discussion)
+// ---------------------------------------------------------------------
+export async function listThreads(companyId) {
+  const { data, error } = await supabase
+    .from("threads")
+    .select("*, author:author_id(full_name,initials,color)")
+    .eq("company_id", companyId)
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return data;
+}
+export async function postThread({ companyId, body, tag = "Note", tagClass = "pill-considering" }) {
+  const { error } = await supabase.from("threads").insert({ company_id: companyId, body, tag, tag_class: tagClass });
+  if (error) throw error;
+}
+export async function listEngineThreads() {
+  const { data, error } = await supabase
+    .from("engine_threads")
+    .select("*, author:author_id(full_name,initials,color), companies:engine_thread_companies(company:company_id(id,name,slug))")
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return data;
+}
+export async function postEngineThread({ topic, body }) {
+  const { error } = await supabase.from("engine_threads").insert({ topic, body });
+  if (error) throw error;
+}
+
+// ---------------------------------------------------------------------
+// Pulse calls / deal flow
+// ---------------------------------------------------------------------
+export async function listPulseCalls(companyId) {
+  const q = supabase.from("pulse_calls").select("*, company:company_id(name,slug), attendees:pulse_call_attendees(member:member_id(full_name,initials,color))").order("call_date", { ascending: false });
+  const { data, error } = await (companyId ? q.eq("company_id", companyId) : q);
+  if (error) throw error;
+  return data;
+}
+export async function listFlowEvents(status) {
+  const q = supabase.from("flow_events").select("*, company:company_id(name,slug)").order("event_date", { ascending: status === "past" });
+  const { data, error } = await (status ? q.eq("status", status) : q);
+  if (error) throw error;
+  return data;
+}
+export async function proposeSession({ kind, companyId, title, format, presenter }) {
+  const { error } = await supabase.from("flow_events").insert({ kind, company_id: companyId || null, title, format, presenter, event_date: new Date().toISOString().slice(0, 10), status: "upcoming" });
+  if (error) throw error;
+}
+
+// ---------------------------------------------------------------------
+// Valuation (OE-internal only — RLS blocks portco reads entirely)
+// ---------------------------------------------------------------------
+export async function getValuation(companyId) {
+  const [{ data: methods, error: e1 }, { data: ceiling, error: e2 }] = await Promise.all([
+    supabase.from("valuation_methods").select("*").eq("company_id", companyId),
+    supabase.from("valuation_ceiling").select("*").eq("company_id", companyId).maybeSingle(),
+  ]);
+  if (e1) throw e1;
+  if (e2) throw e2;
+  return { methods, ceiling };
+}
+
+// ---------------------------------------------------------------------
+// Operations & KPIs / financials / wins / challenges / priorities —
+// the portfolio-company portal writes here, scoped to its own company
+// by RLS regardless of what companyId a client sends.
+// ---------------------------------------------------------------------
+export async function listKpis(companyId, metricKey) {
+  const q = supabase.from("company_kpis").select("*").eq("company_id", companyId).order("period", { ascending: true });
+  const { data, error } = await (metricKey ? q.eq("metric_key", metricKey) : q);
+  if (error) throw error;
+  return data;
+}
+export async function upsertKpi({ id, companyId, metricKey, label, value, unit, period, note }) {
+  const { error } = await supabase.from("company_kpis").upsert({ id, company_id: companyId, metric_key: metricKey, label, value, unit, period: period || null, note });
+  if (error) throw error;
+}
+export async function listFinancials(companyId) {
+  const { data, error } = await supabase.from("company_financials").select("*").eq("company_id", companyId).order("year");
+  if (error) throw error;
+  return data;
+}
+export async function upsertFinancials(row) {
+  const { error } = await supabase.from("company_financials").upsert(row, { onConflict: "company_id,year" });
+  if (error) throw error;
+}
+export async function listWins(companyId) {
+  const { data, error } = await supabase.from("company_wins").select("*").eq("company_id", companyId).order("win_date", { ascending: false });
+  if (error) throw error;
+  return data;
+}
+export async function addWin({ companyId, client, detail, value, isPilot, winDate }) {
+  const { error } = await supabase.from("company_wins").insert({ company_id: companyId, client, detail, value, is_pilot: isPilot, win_date: winDate });
+  if (error) throw error;
+}
+export async function listChallenges(companyId, { includeResolved = false } = {}) {
+  const q = supabase.from("company_challenges").select("*").eq("company_id", companyId).order("created_at", { ascending: false });
+  const { data, error } = await (includeResolved ? q : q.eq("resolved", false));
+  if (error) throw error;
+  return data;
+}
+export async function upsertChallenge(row) {
+  const { error } = await supabase.from("company_challenges").upsert(row);
+  if (error) throw error;
+}
+export async function resolveChallenge(id) {
+  const { error } = await supabase.from("company_challenges").update({ resolved: true }).eq("id", id);
+  if (error) throw error;
+}
+export async function listPriorities(companyId) {
+  const { data, error } = await supabase.from("company_priorities").select("*").eq("company_id", companyId).order("sort_order");
+  if (error) throw error;
+  return data;
+}
+export async function upsertPriority(row) {
+  const { error } = await supabase.from("company_priorities").upsert(row);
+  if (error) throw error;
+}
+
+// ---------------------------------------------------------------------
+// Documents (Deal Room) — metadata in Postgres, bytes in Storage.
+// ---------------------------------------------------------------------
+export async function listDocuments(companyId) {
+  const { data, error } = await supabase.from("documents").select("*").eq("company_id", companyId).order("created_at", { ascending: false });
+  if (error) throw error;
+  return data;
+}
+export async function uploadDocument({ companyId, file, isRestricted = false, ownerLabel }) {
+  const { data: { user } } = await supabase.auth.getUser();
+  const path = `${companyId}/${Date.now()}-${file.name}`;
+  const { error: upErr } = await supabase.storage.from("deal-room-docs").upload(path, file);
+  if (upErr) throw upErr;
+  const { error } = await supabase.from("documents").insert({
+    company_id: companyId, name: file.name, doc_type: file.name.split(".").pop(),
+    storage_path: path, size_bytes: file.size, is_restricted: isRestricted, owner_label: ownerLabel, uploaded_by: user.id,
+  });
+  if (error) throw error;
+}
+export async function getDocumentUrl(storagePath) {
+  const { data, error } = await supabase.storage.from("deal-room-docs").createSignedUrl(storagePath, 60 * 10);
+  if (error) throw error;
+  return data.signedUrl;
+}
+
+// ---------------------------------------------------------------------
+// Realtime — subscribe once per company/table pair; call the returned
+// unsubscribe() on route change / unmount. This is what makes two
+// members' browsers actually converge, which a static JS array never could.
+// ---------------------------------------------------------------------
+export function subscribeToCompanyActivity(companyId, onChange) {
+  const channel = supabase
+    .channel(`company-${companyId}`)
+    .on("postgres_changes", { event: "*", schema: "public", table: "requests", filter: `company_id=eq.${companyId}` }, onChange)
+    .on("postgres_changes", { event: "*", schema: "public", table: "threads", filter: `company_id=eq.${companyId}` }, onChange)
+    .on("postgres_changes", { event: "*", schema: "public", table: "company_challenges", filter: `company_id=eq.${companyId}` }, onChange)
+    .on("postgres_changes", { event: "*", schema: "public", table: "company_kpis", filter: `company_id=eq.${companyId}` }, onChange)
+    .subscribe();
+  return () => supabase.removeChannel(channel);
+}
