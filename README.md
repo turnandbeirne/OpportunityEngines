@@ -30,8 +30,12 @@ This is provisioned and seeded right now, not just source on disk:
   "What's NOT in here yet" below for exact scope and what's still
   missing). `npm run build` succeeds cleanly. **Not yet verified in a live
   browser against the live project** — see the note in "Setup" step 5.
-- **Hosting:** in progress — getting a Git repo to push this to and deploy
-  from (see "Deploy" below for why that step exists at all).
+- **Hosting:** **live.** Deployed on Render as a static site, building
+  from `https://github.com/turnandbeirne/OpportunityEngines` (branch
+  `main`) via `npm install && npm run build`, publishing `dist/`, with
+  `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` set in Render's dashboard.
+  Live at **https://opportunity-engines-platform.onrender.com** —
+  auto-deploys on every push to `main`.
 
 Sign in at the app once it's deployed (or locally via `npm run dev`) with:
 - `michaelb@acceleration-group.com` (role: admin)
@@ -158,9 +162,12 @@ Two things, deliberately scoped out rather than guessed at:
    from a clean checkout instead, copy `.env.example` and fill in those
    two values from the Supabase dashboard → Project Settings → API.
 
-6. **Deploy.** `npm run build` produces a static `dist/` folder for
-   Render, Vercel, Netlify, or any static host, with the two `VITE_`-
-   prefixed env vars set in that host's dashboard. Render's own deploy
-   tools need a Git-clonable repo URL to build from, which is why this
-   needed a repo pushed to first — see the top-level chat for the current
-   state of that.
+6. ~~Deploy.~~ **Done.** Live on Render at
+   https://opportunity-engines-platform.onrender.com, building from
+   `main` on every push, with `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY`
+   set as env vars in the Render service (Render dashboard → this service
+   → Environment, if they ever need to change). Render needed either a
+   public repo or its own GitHub App access to a private one — the repo
+   was made public to unblock this (nothing sensitive is committed;
+   `.env` is gitignored and RLS enforces access server-side regardless of
+   who can read the source).
