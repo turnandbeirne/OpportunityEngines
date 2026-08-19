@@ -15,21 +15,24 @@ import {
   listRequests, createRequest, volunteerForRequest,
   listThreads, postThread,
   listEngineThreads,
-  listPulseCalls, listFlowEvents,
+  listPulseCalls, listFlowEvents, proposeSession,
   getValuation,
   listKpis, listFinancials,
   listWins, listChallenges, listPriorities,
+  getMemberDashboard,
   subscribeToCompanyActivity,
 } from "./lib/api.js";
-// Not wired up in this pass (no UI calls them yet): postEngineThread,
-// proposeSession. Both exist in api.js, ready when that UI gets built.
+// Not wired up in this pass (no UI calls it yet): postEngineThread — exists
+// in api.js, ready when the Engine Directory gets a "start a thread" form.
 
 // ---------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------
 let PROFILE = null; // { id, full_name, initials, role, title, focus, color, company_id }
-let COMPANIES_CACHE = null; // refreshed on each /portfolio visit
+let COMPANIES_CACHE = null; // refreshed on each /portfolio visit; also used by the sidebar's Deep Dive Shortcuts
 let ACTIVITY_UNSUB = null;
+let PINNED_SHORTCUTS = null; // company ids pinned in the sidebar's Deep Dive Shortcuts — session-local, like the prototype
+let SHORTCUTS_EXPANDED = false;
 
 function isOE() {
   return PROFILE && (PROFILE.role === "admin" || PROFILE.role === "oe_member");
@@ -118,6 +121,8 @@ function showApp() {
   document.getElementById("app").classList.add("active");
   renderSidebarUser();
   renderSideNav();
+  renderSideStats();
+  renderSideAsk();
   route();
 }
 
@@ -144,6 +149,9 @@ document.getElementById("logout-link").addEventListener("click", async () => {
   if (ACTIVITY_UNSUB) { ACTIVITY_UNSUB(); ACTIVITY_UNSUB = null; }
   await signOut();
   PROFILE = null;
+  COMPANIES_CACHE = null;
+  PINNED_SHORTCUTS = null;
+  SHORTCUTS_EXPANDED = false;
   location.hash = "";
   showLogin();
 });
@@ -170,6 +178,9 @@ onAuthChange((session) => {
     boot();
   } else if (!session && PROFILE) {
     PROFILE = null;
+    COMPANIES_CACHE = null;
+    PINNED_SHORTCUTS = null;
+    SHORTCUTS_EXPANDED = false;
     showLogin();
   }
 });
@@ -188,17 +199,267 @@ function renderSidebarUser() {
   document.getElementById("topbar-avatar").textContent = initials;
 }
 
-function renderSideNav() {
+function shortcutPool() {
+  return (COMPANIES_CACHE || []).filter((c) => c.bucket !== "considering").sort((a, b) => (b.relevance || 0) - (a.relevance || 0));
+}
+function ensurePinnedInit() {
+  if (PINNED_SHORTCUTS === null) PINNED_SHORTCUTS = shortcutPool().slice(0, 3).map((c) => c.id);
+}
+function toggleShortcutPin(id) {
+  ensurePinnedInit();
+  const idx = PINNED_SHORTCUTS.indexOf(id);
+  if (idx >= 0) PINNED_SHORTCUTS.splice(idx, 1);
+  else {
+    PINNED_SHORTCUTS.push(id);
+    if (PINNED_SHORTCUTS.length > 3) PINNED_SHORTCUTS.shift();
+  }
+  renderSideNav();
+}
+
+async function renderSideNav() {
   const items = [{ id: "portfolio", label: isOE() ? "Portfolio of My Interests" : "My Company", icon: "&#9733;", route: "#/portfolio" }];
   if (isOE()) items.push({ id: "engine", label: "My Opportunity Engine", icon: "&#9881;", route: "#/engine" });
-  const current = (location.hash || "#/portfolio").split("/")[1];
-  document.getElementById("side-nav").innerHTML = items.map((n) => `
+  const hash = location.hash || "#/portfolio";
+  const current = hash.split("/")[1];
+  const navHtml = items.map((n) => `
     <div class="side-nav-item ${n.id === current ? "active" : ""}" data-route="${n.route}">
       <span class="ic">${n.icon}</span><span>${n.label}</span>
     </div>`).join("");
+
+  if (!isOE()) {
+    document.getElementById("side-nav").innerHTML = navHtml;
+    attachSideNavRouteListeners();
+    return;
+  }
+
+  if (!COMPANIES_CACHE) {
+    try { COMPANIES_CACHE = await listCompanies(); } catch (err) { console.error("Failed to load companies for sidebar", err); COMPANIES_CACHE = []; }
+  }
+  ensurePinnedInit();
+  const pool = shortcutPool();
+  const pinned = pool.filter((c) => PINNED_SHORTCUTS.includes(c.id));
+  const rest = pool.filter((c) => !PINNED_SHORTCUTS.includes(c.id));
+  const shortcutRow = (c, isPinned) => {
+    const active = hash === `#/company/${c.slug}` || hash.startsWith(`#/company/${c.slug}/`);
+    return `<div class="side-shortcut-row">
+      <span class="side-nav-item ${active ? "active" : ""}" data-route="#/company/${escapeHtml(c.slug)}" style="padding-left:20px; font-weight:600; flex:1;">
+        <span class="ic" style="font-size:10px;">&#9679;</span><span>${escapeHtml(c.name)}</span>
+      </span>
+      <button class="side-pin-btn ${isPinned ? "pinned" : ""}" data-pin="${c.id}" title="${isPinned ? "Unpin" : "Keep visible (max 3)"}">${isPinned ? "&#9733;" : "&#9734;"}</button>
+    </div>`;
+  };
+
+  document.getElementById("side-nav").innerHTML = navHtml + `
+    <div class="side-section-label">Quick Actions</div>
+    <button class="side-action-btn" data-modal="submit-opportunity"><span class="ic">&#128161;</span><span>Submit an Opportunity</span></button>
+    <button class="side-action-btn" data-modal="connect-entrepreneurs"><span class="ic">&#129309;</span><span>Connect Entrepreneurs</span></button>
+    <button class="side-action-btn" data-modal="recommend-member"><span class="ic">&#11088;</span><span>Recommend a Member</span></button>
+    <div class="side-section-label">Deep Dive Shortcuts</div>
+    ${pinned.map((c) => shortcutRow(c, true)).join("")}
+    ${rest.length ? `
+      <div class="side-shortcut-more-link" id="side-shortcut-toggle">${SHORTCUTS_EXPANDED ? "&#9650; Show less" : `&#9660; Show ${rest.length} more`}</div>
+      ${SHORTCUTS_EXPANDED ? `<div class="side-shortcut-scroll scrollbar-thin">${rest.map((c) => shortcutRow(c, false)).join("")}</div>` : ""}
+    ` : ""}
+  `;
+  attachSideNavRouteListeners();
+  document.querySelectorAll(".side-pin-btn[data-pin]").forEach((el) => {
+    el.addEventListener("click", (e) => { e.stopPropagation(); toggleShortcutPin(el.dataset.pin); });
+  });
+  const toggleLink = document.getElementById("side-shortcut-toggle");
+  if (toggleLink) toggleLink.addEventListener("click", () => { SHORTCUTS_EXPANDED = !SHORTCUTS_EXPANDED; renderSideNav(); });
+  document.querySelectorAll(".side-action-btn[data-modal]").forEach((el) => {
+    el.addEventListener("click", () => openModal(el.dataset.modal));
+  });
+}
+function attachSideNavRouteListeners() {
   document.querySelectorAll(".side-nav-item[data-route]").forEach((el) => {
     el.addEventListener("click", () => { location.hash = el.dataset.route; closeMobileSidebar(); });
   });
+}
+
+// "Snapshot" panel — advisory seats, capital deployed, position value,
+// opportunities matched. OE-only; the prototype's memberSnapshot(), now
+// backed by getMemberDashboard() in api.js instead of in-memory arrays.
+async function renderSideStats() {
+  const el = document.getElementById("side-stats");
+  if (!isOE()) { el.innerHTML = ""; return; }
+  let s;
+  try {
+    s = await getMemberDashboard(PROFILE.id);
+  } catch (err) {
+    console.error("Failed to load sidebar snapshot", err);
+    el.innerHTML = "";
+    return;
+  }
+  const firstName = (PROFILE.full_name || "").split(" ")[0] || "Your";
+  el.innerHTML = `
+    <div class="side-stats-block">
+      <div class="side-stats-title">${escapeHtml(firstName)}'s Snapshot</div>
+      <div class="side-stat-row"><span class="side-stat-label">Opportunities you match</span><span class="side-stat-value gold">${s.opportunitiesMatched}</span></div>
+      <div class="side-stat-row"><span class="side-stat-label">Advisory board spots</span><span class="side-stat-value">${s.activeSpots} active <span style="color:#7f87a0; font-weight:600;">· ${s.inactiveSpots} pending</span></span></div>
+      <div class="side-stat-row"><span class="side-stat-label">Est. earnings /mo</span><span class="side-stat-value gold">${fmtMoney(s.estMonthlyEarnings)}</span></div>
+      <div class="side-stat-row"><span class="side-stat-label">Companies championed</span><span class="side-stat-value gold">${s.championed}</span></div>
+      <div class="side-stat-row"><span class="side-stat-label">Company investments</span><span class="side-stat-value">${fmtMoney(s.capitalInvested)}</span></div>
+      <div class="side-stat-row"><span class="side-stat-label">Est. position value</span><span class="side-stat-value good">${fmtMoney(s.positionValue)}</span></div>
+    </div>`;
+}
+
+// Quick question to the Portfolio GM. The prototype never persisted this
+// anywhere either (no recipient, no inbox to land in) — it just showed a
+// confirmation. Kept honest about that scope here rather than inventing a
+// messaging table silently; wire to a real notify path when one exists.
+const PORTFOLIO_GM_NAME = "Michael Beirne";
+function renderSideAsk() {
+  const el = document.getElementById("side-ask");
+  if (!isOE()) { el.innerHTML = ""; return; }
+  el.innerHTML = `
+    <div class="side-ask-block">
+      <div class="side-ask-title">Ask ${escapeHtml(PORTFOLIO_GM_NAME)}</div>
+      <div class="side-ask-sub">Quick Managing Partner question</div>
+      <textarea class="side-ask-textarea" id="side-ask-text" placeholder="e.g. Can I get an update on the Halcyon credit line?"></textarea>
+      <button class="side-ask-btn" id="side-ask-send">Send</button>
+      <div class="side-ask-confirm" id="side-ask-confirm">&#10003; Sent to ${escapeHtml(PORTFOLIO_GM_NAME)}</div>
+    </div>`;
+  document.getElementById("side-ask-send").addEventListener("click", () => {
+    const ta = document.getElementById("side-ask-text");
+    const confirmEl = document.getElementById("side-ask-confirm");
+    if (!ta.value.trim()) return;
+    ta.value = "";
+    confirmEl.style.display = "block";
+    setTimeout(() => { confirmEl.style.display = "none"; }, 3500);
+  });
+}
+
+// ---------------------------------------------------------------------
+// Sidebar quick-action modals (Submit an Opportunity / Connect
+// Entrepreneurs / Recommend a Member). Submit an Opportunity and Connect
+// Entrepreneurs write real rows (via proposeSession/createRequest, same
+// functions the Deal Flow calendar and Collaboration board use). Recommend
+// a Member has no schema table — matches the prototype's own scope, which
+// just forwarded a confirmation with no real recipient either.
+// ---------------------------------------------------------------------
+function closeModal() {
+  document.getElementById("modal-overlay").classList.remove("active");
+}
+document.getElementById("modal-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "modal-overlay") closeModal();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+
+function modalConfirmHtml(title, text) {
+  return `
+    <div class="modal-confirm active">
+      <div class="ok-check">&#10003;</div>
+      <div style="font-weight:800; font-size:15px; margin-bottom:6px;">${escapeHtml(title)}</div>
+      <div style="font-size:12.8px; color:var(--ink-2); line-height:1.5;">${escapeHtml(text)}</div>
+      <button class="btn btn-primary" style="margin-top:18px;" id="modal-done">Done</button>
+    </div>`;
+}
+function wireModalDone(refreshSidebar) {
+  document.getElementById("modal-done").addEventListener("click", () => {
+    closeModal();
+    if (refreshSidebar) { renderSideStats(); renderSideNav(); }
+  });
+}
+
+function openModal(kind) {
+  const card = document.getElementById("modal-card");
+  if (kind === "submit-opportunity") {
+    const sectors = [...new Set((COMPANIES_CACHE || []).map((c) => c.sector).filter(Boolean))];
+    card.innerHTML = `
+      <div class="modal-head">
+        <div><div class="modal-title">Submit an Opportunity</div><div class="modal-sub">Flag a new company or venture for Opportunity Engines to screen. This adds an upcoming screening item to My Opportunity Engine &rarr; Deal Flow.</div></div>
+        <button class="modal-close" id="modal-close-btn">&times;</button>
+      </div>
+      <form id="modal-form">
+        <div class="modal-field"><label>Company / venture name</label><input id="mo-name" required></div>
+        <div class="modal-field"><label>Sector</label>
+          <select id="mo-sector">${sectors.map((s) => `<option>${escapeHtml(s)}</option>`).join("")}<option>Other</option></select>
+        </div>
+        <div class="modal-field"><label>One-line description</label><input id="mo-desc" placeholder="What do they do, in one sentence?" required></div>
+        <div class="modal-field"><label>Your relationship to this opportunity</label>
+          <select id="mo-rel"><option>I sourced it directly</option><option>I have a warm introduction</option><option>Recommended by a portfolio company</option><option>Other</option></select>
+        </div>
+        <div class="login-error active" id="modal-error" style="display:none;"></div>
+        <div class="modal-foot"><button type="button" class="btn" id="modal-cancel-btn">Cancel</button><button type="submit" class="btn btn-accent">Submit Opportunity</button></div>
+      </form>`;
+    document.getElementById("modal-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const name = document.getElementById("mo-name").value.trim();
+      const desc = document.getElementById("mo-desc").value.trim();
+      const rel = document.getElementById("mo-rel").value;
+      const errEl = document.getElementById("modal-error");
+      try {
+        await proposeSession({ kind: "pitch", companyId: null, title: `Screening: ${name} — ${desc}`, format: "Initial Screen", presenter: PROFILE.full_name });
+        card.innerHTML = modalConfirmHtml("Submitted", `${name} was added to the screening calendar on My Opportunity Engine. Submitted by ${PROFILE.full_name} · ${rel.toLowerCase()}.`);
+        wireModalDone(true);
+      } catch (err) {
+        errEl.textContent = err.message || String(err);
+        errEl.style.display = "block";
+      }
+    });
+  } else if (kind === "connect-entrepreneurs") {
+    card.innerHTML = `
+      <div class="modal-head">
+        <div><div class="modal-title">Connect Entrepreneurs</div><div class="modal-sub">Request a warm introduction on behalf of a portfolio company. This posts directly to that company's Collaboration &amp; Requests board.</div></div>
+        <button class="modal-close" id="modal-close-btn">&times;</button>
+      </div>
+      <form id="modal-form">
+        <div class="modal-field"><label>Which company needs the connection?</label>
+          <select id="ce-company">${(COMPANIES_CACHE || []).map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("")}</select>
+        </div>
+        <div class="modal-field"><label>Type of connection</label>
+          <select id="ce-type"><option>Customer introduction</option><option>Investor introduction</option><option>Hiring / talent</option><option>Partnership</option><option>Advisor</option></select>
+        </div>
+        <div class="modal-field"><label>Who / what they're looking to connect with</label><input id="ce-who" placeholder="e.g. Head of Procurement at a mid-market logistics company" required></div>
+        <div class="modal-field"><label>Context</label><textarea id="ce-context" placeholder="Why this connection, and what would make it useful..."></textarea></div>
+        <div class="login-error active" id="modal-error" style="display:none;"></div>
+        <div class="modal-foot"><button type="button" class="btn" id="modal-cancel-btn">Cancel</button><button type="submit" class="btn btn-accent">Post Request</button></div>
+      </form>`;
+    document.getElementById("modal-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const companyId = document.getElementById("ce-company").value;
+      const companyName = (COMPANIES_CACHE || []).find((c) => c.id === companyId)?.name || "the company";
+      const type = document.getElementById("ce-type").value;
+      const who = document.getElementById("ce-who").value.trim();
+      const context = document.getElementById("ce-context").value.trim();
+      const errEl = document.getElementById("modal-error");
+      try {
+        await createRequest({ companyId, type: "intro", title: `Connect: ${who}`, body: context || `${type} requested on behalf of ${companyName}.` });
+        card.innerHTML = modalConfirmHtml("Request posted", `Posted to ${companyName}'s Collaboration & Requests board. Members can volunteer to make the introduction.`);
+        wireModalDone(true);
+      } catch (err) {
+        errEl.textContent = err.message || String(err);
+        errEl.style.display = "block";
+      }
+    });
+  } else if (kind === "recommend-member") {
+    card.innerHTML = `
+      <div class="modal-head">
+        <div><div class="modal-title">Recommend a Member</div><div class="modal-sub">Nominate someone to join Opportunity Engines. This goes straight to the Managing Partner for review.</div></div>
+        <button class="modal-close" id="modal-close-btn">&times;</button>
+      </div>
+      <form id="modal-form">
+        <div class="modal-field"><label>Candidate name</label><input id="rm-name" required></div>
+        <div class="modal-field"><label>Focus area / expertise</label><input id="rm-focus" placeholder="e.g. Supply Chain Ops, Fintech GTM"></div>
+        <div class="modal-field"><label>Background</label><textarea id="rm-bg" placeholder="Current role, relevant experience..."></textarea></div>
+        <div class="modal-field"><label>Your relationship to them</label><input id="rm-rel" placeholder="e.g. Former colleague, portfolio company CEO"></div>
+        <div class="modal-foot"><button type="button" class="btn" id="modal-cancel-btn">Cancel</button><button type="submit" class="btn btn-accent">Send Recommendation</button></div>
+      </form>`;
+    document.getElementById("modal-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const name = document.getElementById("rm-name").value.trim();
+      if (!name) return;
+      card.innerHTML = modalConfirmHtml("Recommendation sent", `Thanks — ${name} has been forwarded to ${PORTFOLIO_GM_NAME} for review.`);
+      wireModalDone(false);
+    });
+  } else {
+    return;
+  }
+  document.getElementById("modal-overlay").classList.add("active");
+  document.getElementById("modal-close-btn").addEventListener("click", closeModal);
+  document.getElementById("modal-cancel-btn").addEventListener("click", closeModal);
+  closeMobileSidebar();
 }
 
 // ---------------------------------------------------------------------

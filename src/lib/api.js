@@ -25,6 +25,52 @@ export async function listMyAllocations(memberId) {
   return data;
 }
 
+// Sidebar "snapshot" panel (OE members only) — advisory seats, companies
+// championed, capital deployed/position value, and a portfolio-wide
+// "opportunities you match" count. Mirrors the HTML prototype's
+// memberSnapshot()/opportunitiesMatchedCount(), just backed by real
+// queries instead of in-memory arrays. Every table read here is OE/admin
+// -visible for every row (see 002_rls.sql: company_advisors_select,
+// allocations_select_oe), so filtering to "mine" happens client-side by
+// member_id/sponsor_id, same pattern as getMyProfile().
+const ADVISOR_SEAT_MONTHLY = 1500;
+export async function getMemberDashboard(memberId) {
+  const [
+    { data: advisorRows, error: e1 },
+    { count: championed, error: e2 },
+    { data: allocRows, error: e3 },
+    { count: consideringCount, error: e4 },
+    { count: openRequestsCount, error: e5 },
+    { count: upcomingEventsCount, error: e6 },
+  ] = await Promise.all([
+    supabase.from("company_advisors").select("company:company_id(bucket)").eq("member_id", memberId),
+    supabase.from("companies").select("id", { count: "exact", head: true }).eq("sponsor_id", memberId),
+    supabase.from("allocations").select("amount, company:company_id(last_round_valuation, current_mark_mid)").eq("member_id", memberId),
+    supabase.from("companies").select("id", { count: "exact", head: true }).eq("bucket", "considering"),
+    supabase.from("requests").select("id", { count: "exact", head: true }).eq("status", "open"),
+    supabase.from("flow_events").select("id", { count: "exact", head: true }).eq("status", "upcoming"),
+  ]);
+  for (const e of [e1, e2, e3, e4, e5, e6]) if (e) throw e;
+
+  const activeSpots = advisorRows.filter((r) => r.company?.bucket !== "considering").length;
+  const inactiveSpots = advisorRows.filter((r) => r.company?.bucket === "considering").length;
+  const capitalInvested = allocRows.reduce((s, r) => s + Number(r.amount || 0), 0);
+  const positionValue = allocRows.reduce((s, r) => {
+    const valuation = Number(r.company?.last_round_valuation || 0);
+    const mark = Number(r.company?.current_mark_mid || 0);
+    if (!valuation) return s;
+    return s + (Number(r.amount || 0) / valuation) * mark;
+  }, 0);
+
+  return {
+    activeSpots, inactiveSpots,
+    championed: championed || 0,
+    capitalInvested, positionValue,
+    estMonthlyEarnings: activeSpots * ADVISOR_SEAT_MONTHLY,
+    opportunitiesMatched: (consideringCount || 0) + (openRequestsCount || 0) + (upcomingEventsCount || 0),
+  };
+}
+
 // ---------------------------------------------------------------------
 // Collaboration board
 // ---------------------------------------------------------------------
