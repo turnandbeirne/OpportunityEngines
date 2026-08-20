@@ -233,18 +233,27 @@ function toggleShortcutPin(id) {
   renderSideNav();
 }
 
+// Top-level nav's active-item detection can't just split the hash on "/"
+// once "Company Deep Dives" routes to "#/company/<slug>" — that segment is
+// "company", not an id any nav item actually has. Match by hash prefix
+// instead, same as the original prototype's activeTop logic.
+function currentTopNavId(hash) {
+  if (hash.startsWith("#/company")) return "deepdive";
+  if (hash.startsWith("#/engine")) return "engine";
+  if (hash.startsWith("#/team")) return "team";
+  return "portfolio";
+}
+
 async function renderSideNav() {
-  const items = [{ id: "portfolio", label: isOE() ? "Portfolio of My Interests" : "My Company", icon: "&#9733;", route: "#/portfolio" }];
-  if (isOE()) items.push({ id: "engine", label: "My Opportunity Engine", icon: "&#9881;", route: "#/engine" });
-  if (isAdmin()) items.push({ id: "team", label: "Team & Access", icon: "&#128101;", route: "#/team" });
   const hash = location.hash || "#/portfolio";
-  const current = hash.split("/")[1];
-  const navHtml = items.map((n) => `
-    <div class="side-nav-item ${n.id === current ? "active" : ""}" data-route="${n.route}">
-      <span class="ic">${n.icon}</span><span>${n.label}</span>
-    </div>`).join("");
+  const activeTop = currentTopNavId(hash);
+  const items = [{ id: "portfolio", label: isOE() ? "Portfolio of My Interests" : "My Company", icon: "&#9733;", route: "#/portfolio" }];
 
   if (!isOE()) {
+    const navHtml = items.map((n) => `
+      <div class="side-nav-item ${n.id === activeTop ? "active" : ""}" data-route="${n.route}">
+        <span class="ic">${n.icon}</span><span>${n.label}</span>
+      </div>`).join("");
     document.getElementById("side-nav").innerHTML = navHtml;
     attachSideNavRouteListeners();
     return;
@@ -255,6 +264,24 @@ async function renderSideNav() {
   }
   ensurePinnedInit();
   const pool = shortcutPool();
+
+  // "Company Deep Dives" — a direct entry point into a company's Deep
+  // Dive, restored from the original prototype's NAV_ITEMS (it was
+  // dropped in the initial Supabase port and missed by the earlier
+  // sidebar-restoration pass, which only brought back the Deep Dive
+  // Shortcuts sub-list below, not this top-level link). Defaults to the
+  // top-relevance non-"considering" company, same spirit as the
+  // prototype's hardcoded default — just not hardcoded to one company.
+  const deepDiveDefault = pool[0] || COMPANIES_CACHE[0];
+  if (deepDiveDefault) items.push({ id: "deepdive", label: "Company Deep Dives", icon: "&#128269;", route: `#/company/${deepDiveDefault.slug}` });
+  items.push({ id: "engine", label: "My Opportunity Engine", icon: "&#9881;", route: "#/engine" });
+  if (isAdmin()) items.push({ id: "team", label: "Team & Access", icon: "&#128101;", route: "#/team" });
+
+  const navHtml = items.map((n) => `
+    <div class="side-nav-item ${n.id === activeTop ? "active" : ""}" data-route="${n.route}">
+      <span class="ic">${n.icon}</span><span>${n.label}</span>
+    </div>`).join("");
+
   const pinned = pool.filter((c) => PINNED_SHORTCUTS.includes(c.id));
   const rest = pool.filter((c) => !PINNED_SHORTCUTS.includes(c.id));
   const shortcutRow = (c, isPinned) => {
