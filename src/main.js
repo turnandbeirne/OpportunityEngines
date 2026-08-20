@@ -234,14 +234,13 @@ onAuthChange((session) => {
 // Sidebar
 // ---------------------------------------------------------------------
 function renderSidebarUser() {
-  const initials = PROFILE.initials || initialsOf(PROFILE.full_name);
   document.getElementById("side-user").innerHTML = `
-    <div class="avatar">${escapeHtml(initials)}</div>
+    ${avatarHtml(PROFILE, 32)}
     <div>
       <div class="side-user-name">${escapeHtml(PROFILE.full_name)}</div>
       <div class="side-user-role">${escapeHtml(PROFILE.title || (isOE() ? "OE Member" : "Portfolio Company"))}</div>
     </div>`;
-  document.getElementById("topbar-avatar").textContent = initials;
+  document.getElementById("topbar-avatar").innerHTML = avatarHtml(PROFILE, 36);
 }
 
 function shortcutPool() {
