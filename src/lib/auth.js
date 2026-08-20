@@ -48,8 +48,22 @@ export async function getMyProfile() {
   return data;
 }
 
-export async function updateMyProfile({ fullName, title, focus }) {
-  const { error } = await supabase.rpc("update_my_profile", { p_full_name: fullName, p_title: title, p_focus: focus });
+export async function updateMyProfile({
+  fullName, title, focus, bio, interestTags, linkedinUrl, twitterUrl, websiteUrl, contactEmail, phone, avatarUrl,
+}) {
+  const { error } = await supabase.rpc("update_my_profile", {
+    p_full_name: fullName,
+    p_title: title,
+    p_focus: focus,
+    p_bio: bio,
+    p_interest_tags: interestTags || [],
+    p_linkedin_url: linkedinUrl,
+    p_twitter_url: twitterUrl,
+    p_website_url: websiteUrl,
+    p_contact_email: contactEmail,
+    p_phone: phone,
+    p_avatar_url: avatarUrl,
+  });
   if (error) throw error;
 }
 

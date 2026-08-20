@@ -256,6 +256,58 @@ export async function listAllProfiles() {
   return data;
 }
 
+// ---------------------------------------------------------------------
+// Members Lounge — a single member's full profile plus their investment/
+// advisory track record and recent Engine Directory activity. Same
+// profiles_select RLS as everything above (any OE/admin can read any
+// non-portco profile), so no new policies needed for the profile row
+// itself; allocations/company_advisors are already OE/admin-readable for
+// any member (see 002_rls.sql's allocations_select_oe/
+// company_advisors_select), not just the caller's own.
+// ---------------------------------------------------------------------
+export async function getMemberProfile(id) {
+  const { data, error } = await supabase.from("profiles").select("*, company:company_id(id,name,slug)").eq("id", id).single();
+  if (error) throw error;
+  return data;
+}
+
+// Companies this member has capital allocated to — the "invested in"
+// half of their track record.
+export async function listMemberAllocations(memberId) {
+  const { data, error } = await supabase
+    .from("allocations")
+    .select("*, company:company_id(id,name,slug,logo_color,short_code,sector,bucket)")
+    .eq("member_id", memberId)
+    .order("amount", { ascending: false });
+  if (error) throw error;
+  return data;
+}
+
+// Companies this member advises/sits on the board of — the "served on
+// the board of" half.
+export async function listMemberAdvisories(memberId) {
+  const { data, error } = await supabase
+    .from("company_advisors")
+    .select("*, company:company_id(id,name,slug,logo_color,short_code,sector,bucket)")
+    .eq("member_id", memberId);
+  if (error) throw error;
+  return data;
+}
+
+// Recent Engine Directory posts by this member — evidence of how they
+// weigh in on opportunities presented to the group, shown on their
+// profile rather than duplicating a posting UI there.
+export async function listMemberEngineThreads(memberId, limit = 5) {
+  const { data, error } = await supabase
+    .from("engine_threads")
+    .select("id, topic, body, created_at")
+    .eq("author_id", memberId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data;
+}
+
 // Admin editing someone else's role/company/title — allowed by
 // profiles_update_admin (using private.is_admin(), no with-check, so any
 // column can change). Self-service edits go through updateMyProfile()

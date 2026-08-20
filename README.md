@@ -26,23 +26,42 @@ This is provisioned and seeded right now, not just source on disk:
   provision this had no service-role key available.
 - **`invite-member` and `admin-users` edge functions:** deployed and
   active — real account administration (invite, list emails, reset a
-  password), not just the seeded demo accounts.
+  password), not just the seeded demo accounts. **Fixed a real bug this
+  pass:** both functions were missing CORS handling entirely (no OPTIONS
+  response, no `Access-Control-Allow-*` headers on any response), so
+  every call from the browser failed at the preflight stage — Team &
+  Access silently showed no emails and Invite/Reset Password visibly
+  failed with "Failed to fetch". Only caught by an actual live
+  click-through, not code review; both redeployed with standard CORS
+  headers and re-verified live.
 - **Community management:** applied (`003_community.sql`) — in-app
   notifications for `@mentions` and "someone volunteered for your
   request", plus moderation (delete your own post, or any post if you're
   an admin) on requests/threads/engine threads, which previously had no
   delete policy at all.
+- **Members Lounge:** applied (`004_members_lounge.sql`) — bio, self-tagged
+  interest areas, contact/social links, and a photo URL on every profile;
+  a real member directory and profile page showing each member's
+  investment and advisory/board history across the portfolio; a "nudge"
+  notification for suggesting an opportunity might fit someone.
 - **Frontend:** the rendering code is ported from the HTML prototype's
   in-memory arrays to real async Supabase calls (see "What's in here" and
   "What's NOT in here yet" below for exact scope and what's still
-  missing). `npm run build` succeeds cleanly. **Not yet verified in a live
-  browser against the live project** — see the note in "Setup" step 5.
+  missing). `npm run build` succeeds cleanly, and this pass was verified
+  with an actual connected browser against the live site (login, every
+  nav item, posting/deleting/mentioning/nudging, the notification bell,
+  and global search all clicked through directly) — not just code review.
 - **Hosting:** **live.** Deployed on Render as a static site, building
   from `https://github.com/turnandbeirne/OpportunityEngines` (branch
   `main`) via `npm install && npm run build`, publishing `dist/`, with
   `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` set in Render's dashboard.
-  Live at **https://opportunity-engines-platform.onrender.com** —
-  auto-deploys on every push to `main`.
+  Live at **https://opportunity-engines-platform.onrender.com**.
+  Auto-deploy is configured but **does not currently fire** — the GitHub
+  repo was private when the service was first created, so Render's
+  GitHub App was never granted access to it (confirmed: pushes don't
+  trigger a deploy; every deploy so far has been a manual
+  `trigger_deploy` call). Fix: reconnect the repo or install Render's
+  GitHub App from the Render dashboard.
 
 Sign in at the app once it's deployed (or locally via `npm run dev`) with:
 - `michaelb@acceleration-group.com` (role: admin)
@@ -110,10 +129,26 @@ Sign in at the app once it's deployed (or locally via `npm run dev`) with:
   so two people looking at the same company converge without a refresh.
   Also covers the sidebar's Snapshot panel, Quick Actions, and pinnable
   Deep Dive Shortcuts (OE/admin only — restored after the initial port
-  dropped them), a "My Account" panel for every user (edit profile, change
-  your own password), and a "Team & Access" page for admins (member
-  directory with real emails, invite a new member, edit anyone's
-  role/company, reset anyone's password).
+  dropped them), a "My Account" panel for every user (edit profile, bio,
+  interest tags, contact/social links, avatar photo URL, and change your
+  own password), and a "Team & Access" page for admins (member directory
+  with real emails, invite a new member, edit anyone's role/company,
+  reset anyone's password).
+
+  **Members Lounge** (OE/admin only, top-level nav): a real member
+  directory (`#/members`) — search by name, focus, or interest tag — and
+  a full profile page per member (`#/members/:id`) showing their photo or
+  initials, bio, self-tagged areas of interest, contact info and
+  LinkedIn/X/website links, investment history (from `allocations`) and
+  advisory/board history (from `company_advisors`) across the whole
+  portfolio, and their recent Engine Directory posts. Clicking your own
+  avatar (topbar or sidebar) now takes you to your own profile, which has
+  an "Edit My Profile" button opening the extended My Account form below;
+  clicking another member's profile shows a "Suggest an opportunity"
+  button instead — a nudge notification pointing them at a specific
+  portfolio company. Replaces the old read-only "Members" tab that used
+  to live under My Opportunity Engine (promoted to its own nav item, one
+  implementation instead of two).
 
   Community management, on top of all that: a real notifications table
   (not a computed/synthetic one) with a topbar bell — `@mentioning`

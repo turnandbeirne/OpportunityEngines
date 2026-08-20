@@ -118,6 +118,8 @@ select.field-input option{ background: var(--navy-800); color:#fff; }
   width:32px; height:32px; border-radius:50%; background: linear-gradient(135deg, var(--gold-light), var(--gold-dim));
   color:var(--navy-900); font-weight:700; font-size:12.5px; display:flex; align-items:center; justify-content:center; flex-shrink:0;
 }
+#topbar-avatar{ cursor:pointer; transition: opacity .12s ease; }
+#topbar-avatar:hover{ opacity:0.85; }
 .side-user-name{ color:#fff; font-size:12.5px; font-weight:700; line-height:1.2; }
 .side-user-role{ color:#8b93a8; font-size:10.5px; }
 .logout-link{ color:#7f87a0; font-size:11px; margin-top:10px; padding-left:10px; }

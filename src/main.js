@@ -26,6 +26,7 @@ import {
   listAllProfiles, updateProfileAsAdmin, listMentionableMembers,
   createNotification, listMyNotifications, countUnreadNotifications,
   markNotificationRead, markAllNotificationsRead, subscribeToMyNotifications,
+  getMemberProfile, listMemberAllocations, listMemberAdvisories, listMemberEngineThreads,
   subscribeToCompanyActivity,
 } from "./lib/api.js";
 
@@ -81,6 +82,23 @@ function initialsOf(name) {
   if (!name) return "?";
   const parts = name.trim().split(/\s+/);
   return ((parts[0]?.[0] || "") + (parts[1]?.[0] || "")).toUpperCase();
+}
+// Circle avatar for a profile — a real photo when avatar_url is set
+// (Members Lounge/profile page/My Account preview), falling back to the
+// existing colored-initials chip everywhere else, including when a URL
+// is set but fails to load (broken link, deleted image host).
+function avatarHtml(p, size) {
+  const initials = escapeHtml(p.initials || initialsOf(p.full_name));
+  const color = escapeHtml(p.color || "var(--navy-900)");
+  const fontSize = Math.max(10, Math.round(size * 0.36));
+  const base = `width:${size}px;height:${size}px;border-radius:50%;flex-shrink:0;`;
+  if (!p.avatar_url) {
+    return `<div style="${base}background:${color};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:${fontSize}px;">${initials}</div>`;
+  }
+  return `<div style="${base}position:relative;background:${color};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:${fontSize}px;overflow:hidden;">
+    <span>${initials}</span>
+    <img src="${escapeHtml(p.avatar_url)}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;" onerror="this.remove()">
+  </div>`;
 }
 const BUCKET_PILL = { considering: "pill-considering", invested: "pill-invested", advising: "pill-advising" };
 const BUCKET_LABEL = { considering: "Considering", invested: "Invested", advising: "Advising" };
@@ -172,7 +190,17 @@ document.getElementById("logout-link").addEventListener("click", async () => {
 document.getElementById("brand-home").addEventListener("click", () => { location.hash = "#/portfolio"; });
 document.getElementById("mobile-menu-btn").addEventListener("click", toggleMobileSidebar);
 document.getElementById("sidebar-backdrop").addEventListener("click", closeMobileSidebar);
-document.getElementById("side-user").addEventListener("click", () => openModal("my-account"));
+// Both the sidebar user card and the topbar avatar represent "you" — for
+// an OE member/admin they open your own Members Lounge profile (bio,
+// links, investment/advisory history, and an Edit button there opens the
+// form below); a portco contact has no Lounge profile, so theirs still
+// opens the edit form directly.
+function openMyProfileOrAccount() {
+  if (isOE()) location.hash = `#/members/${PROFILE.id}`;
+  else openModal("my-account");
+}
+document.getElementById("side-user").addEventListener("click", openMyProfileOrAccount);
+document.getElementById("topbar-avatar").addEventListener("click", openMyProfileOrAccount);
 function toggleMobileSidebar() {
   document.querySelector(".sidebar").classList.toggle("mobile-open");
   document.getElementById("sidebar-backdrop").classList.toggle("active");
@@ -239,6 +267,7 @@ function toggleShortcutPin(id) {
 // instead, same as the original prototype's activeTop logic.
 function currentTopNavId(hash) {
   if (hash.startsWith("#/company")) return "deepdive";
+  if (hash.startsWith("#/members")) return "lounge";
   if (hash.startsWith("#/engine")) return "engine";
   if (hash.startsWith("#/team")) return "team";
   return "portfolio";
@@ -274,6 +303,7 @@ async function renderSideNav() {
   // prototype's hardcoded default — just not hardcoded to one company.
   const deepDiveDefault = pool[0] || COMPANIES_CACHE[0];
   if (deepDiveDefault) items.push({ id: "deepdive", label: "Company Deep Dives", icon: "&#128269;", route: `#/company/${deepDiveDefault.slug}` });
+  items.push({ id: "lounge", label: "Members Lounge", icon: "&#129706;", route: "#/members" });
   items.push({ id: "engine", label: "My Opportunity Engine", icon: "&#9881;", route: "#/engine" });
   if (isAdmin()) items.push({ id: "team", label: "Team & Access", icon: "&#128101;", route: "#/team" });
 
@@ -417,15 +447,30 @@ function generateTempPassword() {
 function openModal(kind, ctx) {
   const card = document.getElementById("modal-card");
   if (kind === "my-account") {
+    const sectionLabel = (text) => `<div class="side-section-label" style="margin:18px 0 8px; padding:0;">${escapeHtml(text)}</div>`;
     card.innerHTML = `
       <div class="modal-head">
-        <div><div class="modal-title">My Account</div><div class="modal-sub">Update your profile, or change your password.</div></div>
+        <div><div class="modal-title">My Account</div><div class="modal-sub">Update your profile, add a bio and links for the Members Lounge, or change your password.</div></div>
         <button class="modal-close" id="modal-close-btn">&times;</button>
       </div>
       <form id="modal-form">
         <div class="modal-field"><label>Full name</label><input id="ma-name" value="${escapeHtml(PROFILE.full_name)}" required></div>
         <div class="modal-field"><label>Title</label><input id="ma-title" value="${escapeHtml(PROFILE.title || "")}"></div>
         <div class="modal-field"><label>Focus</label><input id="ma-focus" value="${escapeHtml(PROFILE.focus || "")}"></div>
+
+        ${sectionLabel("Members Lounge profile")}
+        <div class="modal-field"><label>Photo URL <span style="font-weight:400; text-transform:none;">(a link to a hosted photo — leave blank to use your initials)</span></label><input id="ma-avatar" value="${escapeHtml(PROFILE.avatar_url || "")}" placeholder="https://…"></div>
+        <div class="modal-field"><label>Bio</label><textarea id="ma-bio" placeholder="A few lines other members will see on your profile.">${escapeHtml(PROFILE.bio || "")}</textarea></div>
+        <div class="modal-field"><label>Areas of interest <span style="font-weight:400; text-transform:none;">(comma-separated — used to match you to future opportunities)</span></label><input id="ma-tags" value="${escapeHtml((PROFILE.interest_tags || []).join(", "))}" placeholder="Fintech, Board seats, Early-stage GTM"></div>
+
+        ${sectionLabel("Contact & social")}
+        <div class="modal-field"><label>Contact email <span style="font-weight:400; text-transform:none;">(shown to other members — separate from your login email)</span></label><input id="ma-contact-email" type="email" value="${escapeHtml(PROFILE.contact_email || "")}"></div>
+        <div class="modal-field"><label>Phone</label><input id="ma-phone" value="${escapeHtml(PROFILE.phone || "")}"></div>
+        <div class="modal-field"><label>LinkedIn URL</label><input id="ma-linkedin" value="${escapeHtml(PROFILE.linkedin_url || "")}" placeholder="linkedin.com/in/…"></div>
+        <div class="modal-field"><label>X / Twitter URL</label><input id="ma-twitter" value="${escapeHtml(PROFILE.twitter_url || "")}"></div>
+        <div class="modal-field"><label>Website</label><input id="ma-website" value="${escapeHtml(PROFILE.website_url || "")}"></div>
+
+        ${sectionLabel("Password")}
         <div class="modal-field"><label>New password <span style="font-weight:400; text-transform:none;">(leave blank to keep it)</span></label><input id="ma-password" type="password" placeholder="At least 8 characters"></div>
         <div class="login-error active" id="modal-error" style="display:none;"></div>
         <div class="modal-foot"><button type="button" class="btn" id="modal-cancel-btn">Cancel</button><button type="submit" class="btn btn-accent">Save</button></div>
@@ -436,6 +481,14 @@ function openModal(kind, ctx) {
       const fullName = document.getElementById("ma-name").value.trim();
       const title = document.getElementById("ma-title").value.trim();
       const focus = document.getElementById("ma-focus").value.trim();
+      const avatarUrl = document.getElementById("ma-avatar").value.trim();
+      const bio = document.getElementById("ma-bio").value.trim();
+      const interestTags = document.getElementById("ma-tags").value.split(",").map((t) => t.trim()).filter(Boolean);
+      const contactEmail = document.getElementById("ma-contact-email").value.trim();
+      const phone = document.getElementById("ma-phone").value.trim();
+      const linkedinUrl = document.getElementById("ma-linkedin").value.trim();
+      const twitterUrl = document.getElementById("ma-twitter").value.trim();
+      const websiteUrl = document.getElementById("ma-website").value.trim();
       const password = document.getElementById("ma-password").value;
       if (password && password.length < 8) {
         errEl.textContent = "Password must be at least 8 characters.";
@@ -443,12 +496,53 @@ function openModal(kind, ctx) {
         return;
       }
       try {
-        await updateMyProfile({ fullName, title, focus });
+        await updateMyProfile({
+          fullName, title, focus, bio, interestTags, linkedinUrl, twitterUrl, websiteUrl, contactEmail, phone, avatarUrl,
+        });
         if (password) await changeMyPassword(password);
         PROFILE = await getMyProfile();
         renderSidebarUser();
         card.innerHTML = modalConfirmHtml("Saved", password ? "Your profile and password were updated." : "Your profile was updated.");
-        wireModalDone(() => { renderSideStats(); renderSideNav(); });
+        wireModalDone(() => { renderSideStats(); route(); });
+      } catch (err) {
+        errEl.textContent = err.message || String(err);
+        errEl.style.display = "block";
+      }
+    });
+  } else if (kind === "nudge-member") {
+    const target = ctx;
+    card.innerHTML = `
+      <div class="modal-head">
+        <div><div class="modal-title">Suggest an opportunity to ${escapeHtml(target.full_name)}</div><div class="modal-sub">Nudges them that a portfolio company could be a fit — they'll see it in their notifications.</div></div>
+        <button class="modal-close" id="modal-close-btn">&times;</button>
+      </div>
+      <form id="modal-form">
+        <div class="modal-field"><label>Company</label>
+          <select id="nm-company">${(COMPANIES_CACHE || []).map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join("")}</select>
+        </div>
+        <div class="modal-field"><label>Why it could be a fit <span style="font-weight:400; text-transform:none;">(optional)</span></label><textarea id="nm-note" placeholder="e.g. Their new supply-chain lead search overlaps with your network…"></textarea></div>
+        <div class="login-error active" id="modal-error" style="display:none;"></div>
+        <div class="modal-foot"><button type="button" class="btn" id="modal-cancel-btn">Cancel</button><button type="submit" class="btn btn-accent">Send Suggestion</button></div>
+      </form>`;
+    document.getElementById("modal-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errEl = document.getElementById("modal-error");
+      const companyId = document.getElementById("nm-company").value;
+      const company = (COMPANIES_CACHE || []).find((c) => c.id === companyId);
+      const note = document.getElementById("nm-note").value.trim();
+      if (!company) {
+        errEl.textContent = "Choose a company.";
+        errEl.style.display = "block";
+        return;
+      }
+      try {
+        await createNotification({
+          recipientId: target.id, actorId: PROFILE.id, type: "nudge", companyId: company.id,
+          message: note ? `Thinks ${company.name} could be a fit for you: "${note}"` : `Thinks ${company.name} could be a fit for you.`,
+          link: `#/company/${company.slug}`,
+        });
+        card.innerHTML = modalConfirmHtml("Sent", `${target.full_name} will see this in their notifications.`);
+        wireModalDone(null);
       } catch (err) {
         errEl.textContent = err.message || String(err);
         errEl.style.display = "block";
@@ -769,7 +863,9 @@ async function refreshNotifBadge() {
   } catch (err) { console.error("Failed to refresh notification badge", err); }
 }
 function notifIcon(type) {
-  return type === "volunteer" ? "&#129309;" : "@";
+  if (type === "volunteer") return "&#129309;";
+  if (type === "nudge") return "&#128161;";
+  return "@";
 }
 async function toggleNotifPanel() {
   const panel = document.getElementById("notif-panel");
@@ -832,7 +928,7 @@ async function handleGlobalSearch(e) {
   if (isOE()) {
     let members = [];
     try { members = await getMentionableMembers(); } catch { members = []; }
-    memberHits = members.filter((m) => (m.full_name || "").toLowerCase().includes(q)).slice(0, 5);
+    memberHits = members.filter((m) => m.role !== "portco_contact" && (m.full_name || "").toLowerCase().includes(q)).slice(0, 5);
   }
   if (!companyHits.length && !memberHits.length) {
     results.innerHTML = `<div class="search-result-item" style="cursor:default;"><div class="search-result-meta">No matches for "${escapeHtml(raw)}"</div></div>`;
@@ -846,7 +942,7 @@ async function handleGlobalSearch(e) {
         <div><div class="search-result-name">${escapeHtml(c.name)}</div><div class="search-result-meta">${escapeHtml(c.sector || "Company")}</div></div>
       </div>`).join("")}
     ${memberHits.map((m) => `
-      <div class="search-result-item" data-goto="${isAdmin() ? "#/team" : ""}">
+      <div class="search-result-item" data-goto="#/members/${m.id}">
         <div class="avatar-sm" style="background:${m.color || "var(--navy-900)"};">${escapeHtml(m.initials || initialsOf(m.full_name))}</div>
         <div><div class="search-result-name">${escapeHtml(m.full_name)}</div><div class="search-result-meta">${escapeHtml(ROLE_LABEL[m.role] || m.role)}</div></div>
       </div>`).join("")}`;
@@ -878,6 +974,10 @@ function route() {
   const parts = hash.replace(/^#\//, "").split("/");
   if (parts[0] === "company" && parts[1]) {
     renderDeepDive(parts[1], parts[2] || "overview");
+  } else if (parts[0] === "members" && parts[1]) {
+    renderMemberProfile(parts[1]);
+  } else if (parts[0] === "members") {
+    renderMembersLounge();
   } else if (parts[0] === "engine") {
     renderEngine(parts[1] || "flow");
   } else if (parts[0] === "team") {
@@ -1256,7 +1356,6 @@ const ENGINE_TABS = [
   { id: "flow", label: "Deal Flow" },
   { id: "pulse", label: "Pulse Calls" },
   { id: "directory", label: "Engine Directory" },
-  { id: "members", label: "Members" },
 ];
 
 async function renderEngine(tab) {
@@ -1273,8 +1372,7 @@ async function renderEngine(tab) {
   try {
     if (validTab === "flow") await renderEngineFlow(body);
     else if (validTab === "pulse") await renderEnginePulse(body);
-    else if (validTab === "directory") await renderEngineDirectory(body);
-    else await renderEngineMembers(body);
+    else await renderEngineDirectory(body);
   } catch (err) {
     body.innerHTML = errorHtml(err);
   }
@@ -1360,36 +1458,185 @@ async function renderEngineDirectory(body) {
   });
 }
 
-// Read-only member directory, available to any OE member (not just
-// admins) — the counterpart to Team & Access's admin-only management view.
-async function renderEngineMembers(body) {
-  let profiles;
+// ---------------------------------------------------------------------
+// Members Lounge — OE/admin only. A real directory: photo/initials,
+// bio, self-tagged areas of interest, contact & social links, and each
+// member's investment/advisory track record across the portfolio. Built
+// in response to "add all community management features you think the
+// site should have" plus a direct follow-up request for exactly this.
+// Distinct from Team & Access (admin-only account administration, e.g.
+// resetting a password) — this is a peer directory anyone OE can browse.
+// ---------------------------------------------------------------------
+let LOUNGE_CACHE = null; // profiles cache local to the Lounge grid, so its own search filter doesn't need a refetch per keystroke
+let LOUNGE_FILTER = "";
+
+async function renderMembersLounge() {
+  if (!isOE()) { location.hash = "#/portfolio"; return; }
+  setTopbar("Members Lounge", "Every Opportunity Engines member — bios, focus areas, and their investment & advisory track record.");
+  setContent(loadingHtml("members"));
   try {
-    profiles = await listAllProfiles();
+    const all = await listAllProfiles();
+    LOUNGE_CACHE = all.filter((p) => p.role !== "portco_contact");
   } catch (err) {
-    body.innerHTML = errorHtml(err);
+    setContent(errorHtml(err));
     return;
   }
-  const rows = profiles.map((p) => `
-    <tr>
-      <td>
-        <div style="display:flex; align-items:center; gap:8px;">
-          <div class="avatar-sm" style="background:${p.color || "var(--navy-900)"};">${escapeHtml(p.initials || initialsOf(p.full_name))}</div>
-          <div><b>${escapeHtml(p.full_name)}</b>${p.title ? `<div style="color:var(--ink-muted); font-size:11px;">${escapeHtml(p.title)}</div>` : ""}</div>
+  renderLoungeGrid();
+}
+
+function renderLoungeGrid() {
+  const q = LOUNGE_FILTER.trim().toLowerCase();
+  const members = (LOUNGE_CACHE || []).filter((p) => {
+    if (!q) return true;
+    const hay = [p.full_name, p.title, p.focus, ...(p.interest_tags || [])].filter(Boolean).join(" ").toLowerCase();
+    return hay.includes(q);
+  });
+  const cards = members.map((p) => `
+    <div class="company-card" data-member="${p.id}" style="cursor:pointer;">
+      <div style="display:flex; gap:12px; align-items:center;">
+        ${avatarHtml(p, 48)}
+        <div style="min-width:0;">
+          <div class="co-name">${escapeHtml(p.full_name)}</div>
+          <div class="co-sector">${escapeHtml(p.title || ROLE_LABEL[p.role] || p.role)}</div>
         </div>
-      </td>
-      <td><span class="chip">${escapeHtml(ROLE_LABEL[p.role] || p.role)}</span></td>
-      <td>${escapeHtml(p.company?.name || "—")}</td>
-      <td>${escapeHtml(p.focus || "—")}</td>
-    </tr>`).join("");
-  body.innerHTML = `
-    <div class="card card-pad">
-      <div class="card-head"><div><div class="card-title">Members</div><div class="card-sub">${profiles.length} ${profiles.length === 1 ? "person has" : "people have"} access to the platform.</div></div></div>
-      <table class="data-table">
-        <thead><tr><th>Name</th><th>Role</th><th>Company</th><th>Focus</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>`;
+      </div>
+      ${p.focus ? `<div class="co-top3">${escapeHtml(p.focus)}</div>` : ""}
+      <div class="chip-row">
+        <span class="chip">${escapeHtml(ROLE_LABEL[p.role] || p.role)}</span>
+        ${(p.interest_tags || []).slice(0, 3).map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join("")}
+      </div>
+    </div>`).join("");
+  setContent(`
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <input id="lounge-search" placeholder="Search by name, focus, or interest tag…" value="${escapeHtml(LOUNGE_FILTER)}"
+        style="width:100%; max-width:420px; padding:10px 12px; border-radius:9px; border:1px solid var(--line); font-size:13px; outline:none; font-family:inherit; background:var(--surface); color:var(--ink);">
+    </div>
+    <div class="company-grid">${cards || `<div class="empty-note">No members match "${escapeHtml(LOUNGE_FILTER)}".</div>`}</div>`);
+  const search = document.getElementById("lounge-search");
+  search.addEventListener("input", (e) => { LOUNGE_FILTER = e.target.value; renderLoungeGrid(); });
+  search.focus();
+  search.setSelectionRange(search.value.length, search.value.length);
+  document.querySelectorAll(".company-card[data-member]").forEach((el) => {
+    el.addEventListener("click", () => { location.hash = `#/members/${el.dataset.member}`; });
+  });
+}
+
+function socialLinkHtml(url, label, icon) {
+  if (!url) return "";
+  const href = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+  return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" class="btn btn-sm" style="text-decoration:none;">${icon} ${escapeHtml(label)}</a>`;
+}
+
+async function renderMemberProfile(id) {
+  if (!isOE()) { location.hash = "#/portfolio"; return; }
+  setTopbar("Member Profile", "");
+  setContent(loadingHtml("profile"));
+  let p, allocations, advisories, activity;
+  try {
+    [p, allocations, advisories, activity] = await Promise.all([
+      getMemberProfile(id),
+      listMemberAllocations(id).catch(() => []),
+      listMemberAdvisories(id).catch(() => []),
+      listMemberEngineThreads(id).catch(() => []),
+    ]);
+  } catch (err) {
+    setContent(errorHtml(err));
+    return;
+  }
+  setTopbar(p.full_name, p.title || ROLE_LABEL[p.role] || p.role);
+  const isSelf = p.id === PROFILE.id;
+
+  const investedRows = allocations.length
+    ? allocations.map((a) => `
+      <div class="thread-item">
+        <div class="co-logo" style="width:32px; height:32px; font-size:11px; background:${escapeHtml(a.company?.logo_color || "var(--navy-900)")}">${escapeHtml(a.company?.short_code || "")}</div>
+        <div class="thread-body">
+          <div class="thread-head"><span class="thread-name">${escapeHtml(a.company?.name || "—")}</span><span class="pill ${BUCKET_PILL[a.company?.bucket] || ""}">${escapeHtml(BUCKET_LABEL[a.company?.bucket] || a.company?.bucket || "")}</span></div>
+          <div class="thread-text">${fmtMoney(a.amount)} allocated</div>
+        </div>
+      </div>`).join("")
+    : `<div class="empty-note">No capital allocations on record.</div>`;
+
+  const advisoryRows = advisories.length
+    ? advisories.map((a) => `
+      <div class="thread-item">
+        <div class="co-logo" style="width:32px; height:32px; font-size:11px; background:${escapeHtml(a.company?.logo_color || "var(--navy-900)")}">${escapeHtml(a.company?.short_code || "")}</div>
+        <div class="thread-body">
+          <div class="thread-head"><span class="thread-name">${escapeHtml(a.company?.name || "—")}</span><span class="pill ${BUCKET_PILL[a.company?.bucket] || ""}">${escapeHtml(BUCKET_LABEL[a.company?.bucket] || a.company?.bucket || "")}</span></div>
+        </div>
+      </div>`).join("")
+    : `<div class="empty-note">No advisory/board seats on record.</div>`;
+
+  const activityRows = activity.length
+    ? activity.map((t) => `
+      <div class="thread-item">
+        <div class="thread-body">
+          <div class="thread-head"><span class="thread-name">${escapeHtml(t.topic)}</span><span class="thread-time">${fmtDateTime(t.created_at)}</span></div>
+          <div class="thread-text">${escapeHtml(t.body)}</div>
+        </div>
+      </div>`).join("")
+    : `<div class="empty-note">No Engine Directory posts yet.</div>`;
+
+  const links = [
+    socialLinkHtml(p.linkedin_url, "LinkedIn", "&#128188;"),
+    socialLinkHtml(p.twitter_url, "X / Twitter", "&#128225;"),
+    socialLinkHtml(p.website_url, "Website", "&#127760;"),
+  ].filter(Boolean).join("");
+  const contactLines = [
+    p.contact_email ? `<div class="co-sector">&#9993; <a href="mailto:${escapeHtml(p.contact_email)}">${escapeHtml(p.contact_email)}</a></div>` : "",
+    p.phone ? `<div class="co-sector">&#128222; ${escapeHtml(p.phone)}</div>` : "",
+  ].filter(Boolean).join("");
+
+  setContent(`
+    <div class="back-link" id="lounge-back">&larr; Back to Members Lounge</div>
+    <div class="co-header">
+      ${avatarHtml(p, 64)}
+      <div>
+        <div class="co-header-name">${escapeHtml(p.full_name)}</div>
+        <div class="co-header-tag">${escapeHtml(p.title || "")}${p.title ? " · " : ""}${escapeHtml(ROLE_LABEL[p.role] || p.role)}</div>
+      </div>
+      <div class="co-header-right">
+        ${isSelf ? `<button class="btn btn-accent" id="edit-my-profile-btn">Edit My Profile</button>` : (isOE() ? `<button class="btn btn-accent" id="nudge-btn">Suggest an opportunity</button>` : "")}
+      </div>
+    </div>
+
+    <div class="grid-2" style="margin-top:16px;">
+      <div class="card card-pad">
+        <div class="card-head"><div class="card-title">Bio</div></div>
+        <div class="thread-text">${p.bio ? escapeHtml(p.bio) : `<span class="empty-note">${isSelf ? "You haven't added a bio yet." : "No bio yet."}</span>`}</div>
+        ${(p.interest_tags || []).length ? `<div class="chip-row" style="margin-top:12px;">${p.interest_tags.map((t) => `<span class="chip">${escapeHtml(t)}</span>`).join("")}</div>` : ""}
+      </div>
+      <div class="card card-pad">
+        <div class="card-head"><div class="card-title">Contact &amp; Links</div></div>
+        ${contactLines || `<div class="empty-note">No contact info shared.</div>`}
+        ${links ? `<div class="chip-row" style="margin-top:12px;">${links}</div>` : ""}
+      </div>
+    </div>
+
+    <div class="grid-2" style="margin-top:16px;">
+      <div class="card card-pad">
+        <div class="card-head"><div class="card-title">Investment History</div></div>
+        ${investedRows}
+      </div>
+      <div class="card card-pad">
+        <div class="card-head"><div class="card-title">Advisory / Board History</div></div>
+        ${advisoryRows}
+      </div>
+    </div>
+
+    <div class="card card-pad" style="margin-top:16px;">
+      <div class="card-head"><div class="card-title">Recent Engine Directory Activity</div></div>
+      ${activityRows}
+    </div>
+  `);
+
+  document.getElementById("lounge-back").addEventListener("click", () => { location.hash = "#/members"; });
+  if (isSelf) {
+    document.getElementById("edit-my-profile-btn").addEventListener("click", () => openModal("my-account"));
+  } else {
+    const nudgeBtn = document.getElementById("nudge-btn");
+    if (nudgeBtn) nudgeBtn.addEventListener("click", () => openModal("nudge-member", p));
+  }
 }
 
 // ---------------------------------------------------------------------
