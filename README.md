@@ -1,5 +1,5 @@
 # Opportunity Engines Platform — Supabase backend
-
+testing-connection..
 This turns the single-file HTML prototype into a real, multi-user product: a
 Postgres database, real authentication, row-level security that enforces
 (not just hides) who can see what, and a client library ready to replace
